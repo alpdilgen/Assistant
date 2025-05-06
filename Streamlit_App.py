@@ -7,6 +7,7 @@ from openai import OpenAI
 import docx
 from PyPDF2 import PdfReader
 import io
+import zipfile
 
 # Set page config and title
 st.set_page_config(
@@ -372,35 +373,49 @@ if submit_button and uploaded_files:
         # Show success message
         st.success(f"Successfully generated translation resources for {source_language} to {target_language}!")
         
-        # Store the data in session state so it persists between downloads
-        if excel_data is not None:
-            st.session_state['excel_data'] = excel_data
-            st.session_state['excel_filename'] = f"glossary_{source_language}_to_{target_language}.xlsx"
+        # Create a combined ZIP file with both documents
+        if excel_data is not None and docx_data is not None:
+            # Create a ZIP file in memory
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED, False) as zip_file:
+                # Add Excel file to ZIP
+                zip_file.writestr(f"glossary_{source_language}_to_{target_language}.xlsx", excel_data.getvalue())
+                
+                # Add Word file to ZIP
+                zip_file.writestr(f"analysis_{source_language}_to_{target_language}.docx", docx_data.getvalue())
             
-        if docx_data is not None:
-            st.session_state['docx_data'] = docx_data
-            st.session_state['docx_filename'] = f"analysis_{source_language}_to_{target_language}.docx"
+            # Reset buffer position
+            zip_buffer.seek(0)
+            
+            # Create download button for ZIP file
+            st.download_button(
+                label="📦 Download All Translation Resources (ZIP)",
+                data=zip_buffer,
+                file_name=f"translation_resources_{source_language}_to_{target_language}.zip",
+                mime="application/zip"
+            )
 
-        # Create columns for download buttons
+        # Also show individual download buttons
+        st.markdown("### Individual Files")
+        st.markdown("If you prefer to download files separately, use these buttons:")
         col1, col2 = st.columns(2)
         
-        # Show download buttons
         with col1:
-            if 'excel_data' in st.session_state:
+            if excel_data is not None:
                 st.download_button(
-                    label="Download Glossary",
-                    data=st.session_state['excel_data'],
-                    file_name=st.session_state['excel_filename'],
+                    label="📊 Download Glossary Only",
+                    data=excel_data,
+                    file_name=f"glossary_{source_language}_to_{target_language}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="download_glossary"
                 )
                 
         with col2:
-            if 'docx_data' in st.session_state:
+            if docx_data is not None:
                 st.download_button(
-                    label="Download Analysis",
-                    data=st.session_state['docx_data'],
-                    file_name=st.session_state['docx_filename'],
+                    label="📝 Download Analysis Only",
+                    data=docx_data,
+                    file_name=f"analysis_{source_language}_to_{target_language}.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     key="download_analysis"
                 )
@@ -415,9 +430,4 @@ if submit_button and uploaded_files:
         status_text.empty()
 
 # Show information when no files are uploaded
-elif submit_button and not uploaded_files:
-    st.error("Please upload at least one file.")
-
-# Add footer
-st.markdown("---")
-st.caption("This application uses AI to analyze documents and create translation resources.")
+elif submit_button and not uplo
