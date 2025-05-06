@@ -40,6 +40,7 @@ def get_openai_client():
         
         # If API key is found, create client
         if api_key:
+            # Create OpenAI client without proxies parameter
             return OpenAI(api_key=api_key)
         else:
             st.error('API key not configured. Please set the OPENAI_API_KEY in config.json, environment, or Streamlit secrets.')
@@ -371,25 +372,38 @@ if submit_button and uploaded_files:
         # Show success message
         st.success(f"Successfully generated translation resources for {source_language} to {target_language}!")
         
+        # Store the data in session state so it persists between downloads
+        if excel_data is not None:
+            st.session_state['excel_data'] = excel_data
+            st.session_state['excel_filename'] = f"glossary_{source_language}_to_{target_language}.xlsx"
+            
+        if docx_data is not None:
+            st.session_state['docx_data'] = docx_data
+            st.session_state['docx_filename'] = f"analysis_{source_language}_to_{target_language}.docx"
+
         # Create columns for download buttons
         col1, col2 = st.columns(2)
         
         # Show download buttons
         with col1:
-            st.download_button(
-                label="Download Glossary",
-                data=excel_data,
-                file_name=f"glossary_{source_language}_to_{target_language}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            
+            if 'excel_data' in st.session_state:
+                st.download_button(
+                    label="Download Glossary",
+                    data=st.session_state['excel_data'],
+                    file_name=st.session_state['excel_filename'],
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_glossary"
+                )
+                
         with col2:
-            st.download_button(
-                label="Download Analysis",
-                data=docx_data,
-                file_name=f"analysis_{source_language}_to_{target_language}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
+            if 'docx_data' in st.session_state:
+                st.download_button(
+                    label="Download Analysis",
+                    data=st.session_state['docx_data'],
+                    file_name=st.session_state['docx_filename'],
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    key="download_analysis"
+                )
             
         # Show preview of analysis
         with st.expander("Preview Analysis"):
