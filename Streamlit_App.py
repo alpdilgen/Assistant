@@ -3,7 +3,7 @@ import os
 import json
 import pandas as pd
 import tempfile
-import anthropic  # Import Anthropic instead of OpenAI
+import anthropic
 import docx
 from PyPDF2 import PdfReader
 import io
@@ -50,31 +50,88 @@ def get_anthropic_client():
         st.error(f'Error initializing Anthropic client: {e}')
         return None
 
-# Function to extract text from files
+# Function to extract text from files with improved encoding handling
 def extract_text_from_file(uploaded_file):
-    """Extract text from uploaded file based on file type"""
+    """Extract text from uploaded file based on file type with improved encoding handling"""
     file_ext = uploaded_file.name.split('.')[-1].lower()
     
     try:
         if file_ext == 'txt':
-            # For text files
-            return uploaded_file.getvalue().decode('utf-8')
+            # For text files - try various encodings
+            content = None
+            encodings = ['utf-8', 'cp1251', 'iso-8859-5', 'windows-1251']  # Common encodings for Cyrillic
+            
+            for encoding in encodings:
+                try:
+                    content = uploaded_file.getvalue().decode(encoding)
+                    # If we get here, decoding worked
+                    st.success(f"Successfully decoded text with {encoding} encoding")
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if content is None:
+                st.error(f"Could not decode text file with any of the attempted encodings")
+                return None
+                
+            return content
+            
         elif file_ext == 'docx':
-            # For Word documents
+            # For Word documents - extract text with more validation
             doc = docx.Document(io.BytesIO(uploaded_file.getvalue()))
-            return '\n'.join([para.text for para in doc.paragraphs])
+            
+            # Extract text from paragraphs
+            paragraphs = []
+            for para in doc.paragraphs:
+                if para.text.strip():  # Only include non-empty paragraphs
+                    paragraphs.append(para.text)
+            
+            # Also check for tables which might contain text
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        if cell.text.strip():
+                            paragraphs.append(cell.text)
+            
+            content = '\n'.join(paragraphs)
+            
+            # Validation and debugging
+            if not content:
+                st.warning(f"The DOCX file appears to be empty or contains no extractable text")
+            else:
+                st.success(f"Successfully extracted {len(content)} characters from DOCX file")
+                
+            return content
+            
         elif file_ext == 'pdf':
-            # For PDF files
+            # For PDF files - with enhanced extraction
             reader = PdfReader(io.BytesIO(uploaded_file.getvalue()))
+            
+            if len(reader.pages) == 0:
+                st.warning("The PDF has no pages")
+                return None
+                
             text = ""
-            for page in reader.pages:
-                text += page.extract_text() + "\n"
+            for i, page in enumerate(reader.pages):
+                page_text = page.extract_text()
+                if page_text:
+                    text += f"--- Page {i+1} ---\n{page_text}\n\n"
+            
+            if not text:
+                st.warning(f"The PDF file appears to be empty or the text couldn't be extracted")
+            else:
+                st.success(f"Successfully extracted {len(text)} characters from {len(reader.pages)} PDF pages")
+                
             return text
+            
         else:
             st.error(f"Unsupported file type: {file_ext}")
             return None
+            
     except Exception as e:
-        st.error(f"Error extracting text from {uploaded_file.name}: {e}")
+        st.error(f"Error extracting text from {uploaded_file.name}: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
         return None
 
 # Function to save analysis as Word document
@@ -305,16 +362,39 @@ if submit_button and uploaded_files:
         if content:
             file_contents.append(content)
     
-    if not file_contents:
-        st.error("No valid content could be extracted from the uploaded files.")
+    # Debug file contents
+    if file_contents:
+        with st.expander("Debug: View Extracted File Contents"):
+            for i, content in enumerate(file_contents):
+                st.text(f"File {i+1} content preview (first 500 chars):")
+                preview = content[:500] + "..." if len(content) > 500 else content
+                st.text(preview)
+                st.text(f"Character count: {len(content)}")
+    else:
+        st.error("No content was extracted from the uploaded files.")
         st.stop()
     
     # Update progress
     progress_bar.progress(0.3)
     status_text.text("Analyzing content with Claude...")
     
-    # Combine file contents
+    # Ensure there is actual content to process
     combined_content = "\n\n".join(file_contents)
+    if not combined_content.strip():
+        st.error("The extracted file content appears to be empty. Please check that your files contain text that can be properly extracted.")
+        st.stop()
+
+    st.info(f"Total character count of extracted content: {len(combined_content)}")
+    
+    # Add a small example if the content is too short (for testing)
+    if len(combined_content) < 10:
+        st.warning("The extracted content is very short. Adding example text for testing.")
+        if source_language == "Bulgarian":
+            combined_content += """
+            Пример текст на български:
+            Здравейте! Това е пример за текст на български. Тук може да добавите вашия собствен текст.
+            Използвайте реален текст, за да получите по-добри резултати от анализа.
+            """
     
     # Create analysis prompt for Claude
     analysis_prompt = f"""
@@ -426,6 +506,8 @@ if submit_button and uploaded_files:
         
     except Exception as e:
         st.error(f"Error processing request: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
         progress_bar.empty()
         status_text.empty()
 
