@@ -69,7 +69,7 @@ def read_file_content(uploaded_file):
     else:
         return f"[Unsupported file format: {file_ext}]"
 
-def generate_claude_response(file_contents, source_lang, target_lang, api_key):
+def generate_claude_response(file_contents, source_lang, target_lang, api_key, model_name):
     """Generate response from Claude API"""
     try:
         client = anthropic.Anthropic(api_key=api_key)
@@ -87,9 +87,9 @@ def generate_claude_response(file_contents, source_lang, target_lang, api_key):
         {file_contents}
         """
         
-        # Make the API call to Claude
+        # Make the API call to Claude using the selected model
         response = client.messages.create(
-            model="claude-3-sonnet-20240229",
+            model=model_name,
             max_tokens=4096,
             temperature=0.3,
             system="You are a professional localization specialist with expertise in translation projects.",
@@ -97,6 +97,7 @@ def generate_claude_response(file_contents, source_lang, target_lang, api_key):
                 {"role": "user", "content": prompt}
             ]
         )
+                
         return response.content[0].text
     except Exception as e:
         return f"Error calling Claude API: {str(e)}"
@@ -135,6 +136,14 @@ def main():
     api_key = st.text_input("Enter your Anthropic API Key:", type="password", value=st.session_state.api_key)
     st.session_state.api_key = api_key
     
+    # Model selection dropdown
+    model_options = [
+        "claude-3-5-sonnet-20240620",
+        "claude-3-opus-20240229",
+        "claude-3-haiku-20240307"
+    ]
+    selected_model = st.selectbox("Select Claude Model:", model_options)
+    
     # Create two columns for the language selection
     col1, col2 = st.columns(2)
     
@@ -172,7 +181,7 @@ def main():
             if not api_key:
                 st.error("Please enter your Anthropic API Key.")
             else:
-                with st.spinner("Analyzing content and generating style guide..."):
+                with st.spinner(f"Analyzing content and generating style guide using {selected_model}..."):
                     # Extract content from all files
                     file_contents = []
                     for file in uploaded_files:
@@ -182,7 +191,7 @@ def main():
                     combined_content = "\n".join(file_contents)
                     
                     # Generate response using Claude
-                    ai_response = generate_claude_response(combined_content, source_lang, target_lang, api_key)
+                    ai_response = generate_claude_response(combined_content, source_lang, target_lang, api_key, selected_model)
                     
                     if ai_response.startswith("Error"):
                         st.error(ai_response)
@@ -236,11 +245,21 @@ def main():
     st.sidebar.header("How It Works")
     st.sidebar.write("""
     1. Enter your Anthropic API Key
-    2. Upload your translation files
-    3. Select source and target languages
-    4. Click 'Generate Style Guide'
-    5. Review the generated style guide
-    6. Download in your preferred format
+    2. Select a Claude model
+    3. Upload your translation files
+    4. Select source and target languages
+    5. Click 'Generate Style Guide'
+    6. Review the generated style guide
+    7. Download in your preferred format
+    """)
+    
+    # Add model information
+    st.sidebar.header("Available Models")
+    st.sidebar.write("""
+    Choose the model that works best for your API key:
+    - Claude 3.5 Sonnet (newest)
+    - Claude 3 Opus
+    - Claude 3 Haiku
     """)
     
     # Add footer
