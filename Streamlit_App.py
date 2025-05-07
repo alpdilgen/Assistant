@@ -137,49 +137,66 @@ def save_analysis_as_word(content):
 
 # Function to extract glossary terms
 def extract_glossary_terms(text, source_language, target_language):
-    """Extract glossary terms from the API response"""
+    """Extract glossary terms from the API response with better handling"""
     try:
-        # Look for markdown table in the text
-        terms = []
+        # First, try to find the glossary section
         lines = text.split('\n')
-        
-        # Find the glossary section
         glossary_section_start = None
+        
+        # Look for the glossary section header
         for i, line in enumerate(lines):
-            if '## glossary' in line.lower() or '#glossary' in line.lower() or 'glossary' in line.lower():
+            if '## glossary' in line.lower() or '# glossary' in line.lower() or 'glossary:' in line.lower():
                 glossary_section_start = i
                 break
         
-        if glossary_section_start is None:
-            st.warning("No glossary section found in API response")
-            return []
-        
-        # Look for the table after the glossary section header
+        # If no explicit glossary section found, look for table markers
         table_start = None
-        for i in range(glossary_section_start, len(lines)):
-            if '|' in lines[i]:
-                table_start = i
-                break
+        if glossary_section_start is not None:
+            # Look for the table after the glossary section header
+            for i in range(glossary_section_start, len(lines)):
+                if '|' in lines[i]:
+                    table_start = i
+                    break
+        else:
+            # No glossary section found, look for any table in the text
+            for i, line in enumerate(lines):
+                if '|' in line and ('term' in line.lower() or source_language.lower() in line.lower()):
+                    table_start = i
+                    break
         
         if table_start is None:
-            st.warning("No table found in glossary section")
-            return []
+            st.warning("No glossary table found in the AI response. Will generate an empty glossary file.")
+            # Return a minimal empty structure to still generate the Excel file
+            return [{'source_term': 'No terms extracted', 
+                    'target_term': 'Please check the analysis document', 
+                    'english_reference': '', 
+                    'example': ''}]
         
         # Process the table
-        # Skip the header and separator rows
+        terms = []
         current_line = table_start
         
-        # Skip the header row
-        current_line += 1
+        # Skip header row if it exists
+        if ('term' in lines[current_line].lower() or 
+            source_language.lower() in lines[current_line].lower() or 
+            '---' in lines[current_line] or 
+            '===' in lines[current_line]):
+            current_line += 1
         
-        # Skip the separator row (contains dashes)
-        if current_line < len(lines) and ('-+-' in lines[current_line].replace(' ', '') or 
-                                          '-|-' in lines[current_line].replace(' ', '')):
+        # Skip separator row if it exists (contains dashes)
+        if current_line < len(lines) and ('-' in lines[current_line] or 
+                                          '|--' in lines[current_line] or 
+                                          '+--' in lines[current_line]):
             current_line += 1
         
         # Process data rows
         while current_line < len(lines) and '|' in lines[current_line]:
             line = lines[current_line]
+            
+            # Skip empty or separator lines
+            if line.strip() == '' or line.strip() == '|' or '--' in line:
+                current_line += 1
+                continue
             
             # Split by pipe and remove leading/trailing whitespace
             columns = [col.strip() for col in line.split('|')]
@@ -197,10 +214,22 @@ def extract_glossary_terms(text, source_language, target_language):
             
             current_line += 1
         
+        if not terms:
+            st.warning("Glossary table found but no terms could be extracted. Will generate an empty glossary file.")
+            return [{'source_term': 'No terms extracted', 
+                    'target_term': 'Please check the analysis document', 
+                    'english_reference': '', 
+                    'example': ''}]
+        
+        st.success(f"Successfully extracted {len(terms)} glossary terms!")
         return terms
     except Exception as e:
         st.error(f"Error extracting glossary terms: {e}")
-        return []
+        # Return a minimal structure to still generate the Excel file
+        return [{'source_term': 'Error extracting terms', 
+                'target_term': f'Error: {str(e)}', 
+                'english_reference': '', 
+                'example': ''}]
 
 # Function to create Excel file from glossary terms
 def create_glossary_excel(terms):
@@ -312,17 +341,24 @@ if submit_button and uploaded_files:
     # Combine file contents
     combined_content = "\n\n".join(file_contents)
     
-    # Create analysis prompt
+    # Create analysis prompt with explicit glossary format instructions
     analysis_prompt = f"""
     I need you to analyze these {source_language} documents for translation into {target_language}. Please:
 
     1. Analyze the content and subject matter of these documents
     2. Create a detailed translator persona specializing in {source_language} to {target_language} translation for this specific content domain
     3. Create a comprehensive glossary of terms with example sentences from the documents
-    4. Format the glossary STRICTLY as a markdown table with these exact columns:
-       | {source_language} Term | {target_language} Translation | English Reference | Example Sentence |
-       
-    IMPORTANT: Make sure to include the glossary in a clearly marked section with the heading "## Glossary" and format it as a proper markdown table with header and separator rows.
+    4. VERY IMPORTANT: Format the glossary EXACTLY with this format:
+
+    ## Glossary
+
+    | {source_language} Term | {target_language} Translation | English Reference | Example Sentence |
+    |------------------------|-------------------------------|-------------------|------------------|
+    | Term 1 | Translation 1 | English 1 | Example 1 |
+    | Term 2 | Translation 2 | English 2 | Example 2 |
+
+    You must include the "## Glossary" heading exactly as shown above, followed by the markdown table.
+    Please don't translate the documents themselves - I just need the analysis and glossary to assist a human translator.
 
     Here are the document contents:
 
@@ -354,9 +390,6 @@ if submit_button and uploaded_files:
         
         # Extract glossary terms
         glossary_terms = extract_glossary_terms(analysis_result, source_language, target_language)
-        
-        if not glossary_terms:
-            st.warning("No glossary terms could be extracted from the AI response.")
         
         # Create Excel file
         progress_bar.progress(0.8)
