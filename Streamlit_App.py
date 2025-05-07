@@ -8,6 +8,7 @@ import docx
 from PyPDF2 import PdfReader
 import io
 import zipfile
+import time
 
 # Set page config and title
 st.set_page_config(
@@ -413,6 +414,141 @@ def create_glossary_excel(terms):
         st.error(f"Error creating Excel file: {e}")
         return None
 
+# Function to make a combined analysis and glossary API call (to avoid rate limits)
+def generate_combined_analysis_and_glossary(source_language, target_language, combined_content, model, analysis_style):
+    client = get_anthropic_client()
+    if not client:
+        st.error("Could not initialize Anthropic client")
+        return None, None
+    
+    # Create a combined prompt that requests both analysis and glossary
+    if analysis_style == "Detailed (with translator persona)":
+        combined_prompt = f"""
+        I need you to provide two separate and complete analyses of these {source_language} documents for translation into {target_language}:
+
+        PART 1: CONTENT ANALYSIS
+        
+        1. Analysis of the Content and Subject Matter:
+           - Identify the specific organization, company, or entity these documents belong to
+           - Name the specific location mentioned in the documents
+           - Categorize each document individually (Document 1, Document 2, etc.) with its purpose
+           - List the key topics and services covered in each document
+           - Identify the content domain and any specialized fields involved
+        
+        2. Translator Persona: {source_language} to {target_language} Specialist
+           - Give the persona a name that would be appropriate for a {target_language} native speaker
+           - Specialization: Clearly state their expertise relevant to these documents
+           - Background:
+             * Education details (university, degree)
+             * Years of experience
+             * Specialized training relevant to the document domains
+             * Language proficiency levels
+             * Previous relevant work experience
+           - Translation Approach:
+             * How they handle register (formal/informal)
+             * How they handle specialized terminology
+             * Cultural adaptation approaches
+             * Consistency strategies
+             * How they handle legal or technical content
+             * Tone preservation techniques
+        
+        PART 2: GLOSSARY OF TERMS
+        
+        After the analysis, please provide a comprehensive glossary formatted as a markdown table with the following columns:
+        | {source_language} Term | {target_language} Translation | English Reference | Example |
+        
+        For the glossary:
+        - Include AT LEAST 80 domain-specific terms from the documents
+        - Focus on specialized terminology relevant to the document domain
+        - Provide accurate {target_language} translations
+        - Include an English reference term for each entry
+        - Where possible, include an example phrase from the original documents
+        
+        Here are the document contents:
+        
+        {combined_content}
+        """
+    else:
+        # Basic analysis prompt
+        combined_prompt = f"""
+        I need you to provide two separate analyses of these {source_language} documents for translation into {target_language}:
+        
+        PART 1: CONTENT ANALYSIS
+        
+        Provide a brief analysis:
+        - Main subject matter (what type of documents are these?)
+        - Primary content areas and domain
+        - Key challenges for translation
+        
+        PART 2: GLOSSARY OF TERMS
+        
+        After the analysis, please provide a comprehensive glossary formatted as a markdown table with the following columns:
+        | {source_language} Term | {target_language} Translation | English Reference | Example |
+        
+        For the glossary:
+        - Include AT LEAST 80 domain-specific terms from the documents
+        - Focus on specialized terminology relevant to the document domain
+        - Provide accurate {target_language} translations
+        - Include an English reference term for each entry
+        - Where possible, include an example phrase from the original documents
+        
+        Here are the document contents:
+        
+        {combined_content}
+        """
+    
+    # Make a single API call for both parts
+    try:
+        message = client.messages.create(
+            model=model,
+            max_tokens=4000,
+            temperature=0.1,
+            system="You are an expert translator analyzing documents for translation. First provide detailed document analysis, then create a comprehensive terminology glossary with at least 80 domain-specific terms.",
+            messages=[
+                {"role": "user", "content": combined_prompt}
+            ]
+        )
+        
+        combined_result = message.content[0].text
+        
+        # Split the result into analysis and glossary parts
+        if "PART 2: GLOSSARY OF TERMS" in combined_result:
+            parts = combined_result.split("PART 2: GLOSSARY OF TERMS", 1)
+            analysis_result = parts[0].strip()
+            glossary_result = parts[1].strip() if len(parts) > 1 else ""
+        elif "## Glossary of Terms" in combined_result:
+            parts = combined_result.split("## Glossary of Terms", 1)
+            analysis_result = parts[0].strip()
+            glossary_result = "## Glossary of Terms" + parts[1].strip() if len(parts) > 1 else ""
+        elif "|" in combined_result:
+            # If there's a table, use that as a separator
+            lines = combined_result.split("\n")
+            table_start = -1
+            
+            for i, line in enumerate(lines):
+                if "|" in line and (i+1 < len(lines) and "---" in lines[i+1]):
+                    table_start = i
+                    break
+            
+            if table_start > 0:
+                analysis_result = "\n".join(lines[:table_start-1]).strip()
+                glossary_result = "\n".join(lines[table_start-1:]).strip()
+            else:
+                analysis_result = combined_result
+                glossary_result = ""
+        else:
+            # Fallback
+            analysis_result = combined_result
+            glossary_result = ""
+        
+        return analysis_result, glossary_result
+        
+    except Exception as e:
+        st.error(f"Error in combined API call: {e}")
+        import traceback
+        st.error(traceback.format_exc())
+        return None, None
+
 # Create form for user input
 with st.form("translation_form"):
     # Language Selection
@@ -463,6 +599,14 @@ with st.form("translation_form"):
         options=["Detailed (with translator persona)", "Basic"],
         index=0,  # Default to detailed
         help="Detailed creates a full analysis with persona. Basic provides minimal analysis."
+    )
+
+    # API mode to avoid rate limits
+    api_mode = st.radio(
+        "API Mode:",
+        options=["Single Call (recommended)", "Separate Calls"],
+        index=0,  # Default to single call
+        help="Single Call avoids rate limits but may have less detailed results. Separate Calls gives better quality but may hit rate limits."
     )
     
     # Submit button
@@ -522,7 +666,16 @@ if submit_button and uploaded_files:
         st.error("The extracted file content appears to be empty. Please check that your files contain text that can be properly extracted.")
         st.stop()
 
-    st.info(f"Total character count of extracted content: {len(combined_content)}")
+    # Show total character count
+    character_count = len(combined_content)
+    token_estimate = character_count // 4  # Rough estimate
+    st.info(f"Total character count: {character_count} (est. {token_estimate} tokens)")
+    
+    # Check if content is too long and truncate if necessary
+    max_tokens = 90000  # Maximum safe input size
+    if token_estimate > max_tokens:
+        st.warning(f"Content may be too large for analysis. Truncating to approximately {max_tokens} tokens.")
+        combined_content = combined_content[:max_tokens*4]  # Truncate to max token limit
     
     # Add a small example if the content is too short (for testing)
     if len(combined_content) < 10:
@@ -534,120 +687,139 @@ if submit_button and uploaded_files:
             Използвайте реален текст, за да получите по-добри резултати от анализа.
             """
     
-    # Create analysis prompt for Claude - separate analysis from glossary
-    if analysis_style == "Detailed (with translator persona)":
-        analysis_prompt = f"""
-        I need you to analyze these {source_language} documents for translation into {target_language}. Please:
-        
-        1. Analysis of the Content and Subject Matter:
-           - Identify the specific organization, company, or entity these documents belong to
-           - Name the specific location mentioned in the documents
-           - Categorize each document individually (Document 1, Document 2, etc.) with its purpose
-           - List the key topics and services covered in each document
-           - Identify the content domain and any specialized fields involved
-        
-        2. Translator Persona: {source_language} to {target_language} Specialist
-           - Give the persona a name that would be appropriate for a {target_language} native speaker
-           - Specialization: Clearly state their expertise relevant to these documents
-           - Background:
-             * Education details (university, degree)
-             * Years of experience
-             * Specialized training relevant to the document domains
-             * Language proficiency levels
-             * Previous relevant work experience
-           - Translation Approach:
-             * How they handle register (formal/informal)
-             * How they manage specialized terminology
-             * Cultural adaptation approaches
-             * Consistency strategies
-             * How they handle legal or technical content
-             * Tone preservation techniques
-        
-        DO NOT include any glossary/terminology list in your response.
-        
-        Please don't translate the documents themselves - I just need the detailed analysis and translator persona.
-        
-        Here are the document contents:
-        
-        {combined_content}
-        """
-    else:
-        # Basic analysis prompt
-        analysis_prompt = f"""
-        Provide a brief analysis of these {source_language} documents for translation into {target_language}:
-        
-        1. Main subject matter (what type of documents are these?)
-        2. Primary content areas and domain
-        3. Key challenges for translation
-        
-        Keep this analysis brief and focused. DO NOT include any glossary or terminology list.
-        
-        Here are the document contents:
-        
-        {combined_content}
-        """
-    
-    # Create glossary prompt for Claude - focused on comprehensive terminology
-    glossary_prompt = f"""
-    I need you to create a comprehensive glossary of terms from these {source_language} documents for translation into {target_language}.
-    
-    Format the glossary as a table with these exact columns:
-    | {source_language} Term | {target_language} Translation | English Reference | Example |
-    
-    Guidelines:
-    - Include AT LEAST 80-100 domain-specific terms from the documents
-    - Focus on specialized terminology relevant to the document domain
-    - Provide accurate {target_language} translations
-    - Include an English reference term for each entry
-    - Where possible, include an example phrase or sentence from the original documents
-    - DO NOT include common words unless they have a specialized meaning in this context
-    - DO NOT include explanations or notes outside the table
-    
-    Here are the document contents:
-    
-    {combined_content}
-    """
-    
-    # Call Anthropic API for analysis
+    # Process the content based on selected API mode
     try:
-        status_text.text("Generating content analysis and translator persona...")
-        progress_bar.progress(0.4)
-        
-        # Make API request to Claude for analysis
-        analysis_message = client.messages.create(
-            model=model,
-            max_tokens=4000,
-            temperature=0.1,
-            system="You are an expert document analyst specializing in translation preparation. You identify document types, subject matter, and create detailed translator personas with backgrounds and specialized approaches.",
-            messages=[
-                {"role": "user", "content": analysis_prompt}
-            ]
-        )
-        
-        # Get analysis response content
-        analysis_result = analysis_message.content[0].text
-        
-        # Update progress
-        progress_bar.progress(0.6)
-        status_text.text("Generating comprehensive terminology glossary...")
-        
-        # Make API request to Claude for glossary
-        glossary_message = client.messages.create(
-            model="claude-3-opus-20240229",  # Use Opus for best terminology results
-            max_tokens=4000,
-            temperature=0.1,
-            system="You are a terminology specialist expert in creating comprehensive multilingual glossaries. You extract ALL domain-specific terms from documents and provide accurate translations without summarizing or reducing the number of terms.",
-            messages=[
-                {"role": "user", "content": glossary_prompt}
-            ]
-        )
-        
-        # Get glossary response content
-        glossary_result = glossary_message.content[0].text
-        
-        # Update progress
-        progress_bar.progress(0.8)
-        status_text.text("Processing glossary and preparing documents...")
+        if api_mode == "Single Call (recommended)":
+            # Use combined API call approach to avoid rate limits
+            status_text.text("Sending request to Claude (combined analysis and glossary)...")
+            progress_bar.progress(0.4)
+            
+            analysis_result, glossary_result = generate_combined_analysis_and_glossary(
+                source_language, target_language, combined_content, model, analysis_style
+            )
+            
+            if not analysis_result:
+                st.error("Failed to generate analysis. Please try again with smaller files or use a different model.")
+                st.stop()
+                
+            progress_bar.progress(0.8)
+            status_text.text("Processing results...")
+            
+        else:  # Separate Calls mode
+            # Use two separate API calls (may hit rate limits)
+            # Create analysis prompt for Claude
+            if analysis_style == "Detailed (with translator persona)":
+                analysis_prompt = f"""
+                I need you to analyze these {source_language} documents for translation into {target_language}. Please:
+                
+                1. Analysis of the Content and Subject Matter:
+                   - Identify the specific organization, company, or entity these documents belong to
+                   - Name the specific location mentioned in the documents
+                   - Categorize each document individually (Document 1, Document 2, etc.) with its purpose
+                   - List the key topics and services covered in each document
+                   - Identify the content domain and any specialized fields involved
+                
+                2. Translator Persona: {source_language} to {target_language} Specialist
+                   - Give the persona a name that would be appropriate for a {target_language} native speaker
+                   - Specialization: Clearly state their expertise relevant to these documents
+                   - Background:
+                     * Education details (university, degree)
+                     * Years of experience
+                     * Specialized training relevant to the document domains
+                     * Language proficiency levels
+                     * Previous relevant work experience
+                   - Translation Approach:
+                     * How they handle register (formal/informal)
+                     * How they handle specialized terminology
+                     * Cultural adaptation approaches
+                     * Consistency strategies
+                     * How they handle legal or technical content
+                     * Tone preservation techniques
+                
+                DO NOT include any glossary/terminology list in your response.
+                
+                Here are the document contents:
+                
+                {combined_content}
+                """
+            else:
+                # Basic analysis prompt
+                analysis_prompt = f"""
+                Provide a brief analysis of these {source_language} documents for translation into {target_language}:
+                
+                1. Main subject matter (what type of documents are these?)
+                2. Primary content areas and domain
+                3. Key challenges for translation
+                
+                Keep this analysis brief and focused. DO NOT include any glossary or terminology list.
+                
+                Here are the document contents:
+                
+                {combined_content}
+                """
+                
+            # Create glossary prompt
+            glossary_prompt = f"""
+            I need you to create a comprehensive glossary of terms from these {source_language} documents for translation into {target_language}.
+            
+            Format the glossary as a table with these exact columns:
+            | {source_language} Term | {target_language} Translation | English Reference | Example |
+            
+            Guidelines:
+            - Include AT LEAST 80 domain-specific terms from the documents
+            - Focus on specialized terminology relevant to the document domain
+            - Provide accurate {target_language} translations
+            - Include an English reference term for each entry
+            - Where possible, include an example phrase from the original documents
+            - DO NOT include common words unless they have a specialized meaning in this context
+            - DO NOT include explanations or notes outside the table
+            
+            Here are the document contents:
+            
+            {combined_content}
+            """
+            
+            # Make API request to Claude for analysis
+            status_text.text("Generating content analysis and translator persona...")
+            progress_bar.progress(0.4)
+            
+            analysis_message = client.messages.create(
+                model=model,
+                max_tokens=4000,
+                temperature=0.1,
+                system="You are an expert document analyst specializing in translation preparation. You identify document types, subject matter, and create detailed translator personas with backgrounds and specialized approaches.",
+                messages=[
+                    {"role": "user", "content": analysis_prompt}
+                ]
+            )
+            
+            # Get analysis response content
+            analysis_result = analysis_message.content[0].text
+            
+            # Update progress
+            progress_bar.progress(0.6)
+            status_text.text("Generating comprehensive terminology glossary...")
+            
+            # Wait a bit to avoid rate limits
+            time.sleep(3)
+            
+            # Make API request to Claude for glossary
+            glossary_message = client.messages.create(
+                model="claude-3-opus-20240229",  # Use Opus for best terminology results
+                max_tokens=4000,
+                temperature=0.1,
+                system="You are a terminology specialist expert in creating comprehensive multilingual glossaries. You extract ALL domain-specific terms from documents and provide accurate translations without summarizing or reducing the number of terms.",
+                messages=[
+                    {"role": "user", "content": glossary_prompt}
+                ]
+            )
+            
+            # Get glossary response content
+            glossary_result = glossary_message.content[0].text
+            
+            # Update progress
+            progress_bar.progress(0.8)
+            status_text.text("Processing glossary and preparing documents...")
         
         # Extract glossary terms
         glossary_terms = extract_glossary_terms(glossary_result, source_language, target_language)
