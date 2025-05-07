@@ -430,4 +430,9 @@ if submit_button and uploaded_files:
         status_text.empty()
 
 # Show information when no files are uploaded
-elif submit_button and not uplo
+elif submit_button and not uploaded_files:
+    st.error("Please upload at least one file.")
+
+# Add footer
+st.markdown("---")
+st.caption("This application uses AI to analyze documents and create translation resources.")
