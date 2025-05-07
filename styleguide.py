@@ -10,15 +10,10 @@ import anthropic
 import json
 from typing import List, Dict, Any
 import httpx
-import base64
 from io import BytesIO
 
 # Set page configuration
 st.set_page_config(page_title="Translation Style Guide Generator", layout="wide")
-
-# Initialize session state for storing API key
-if 'api_key' not in st.session_state:
-    st.session_state.api_key = ""
 
 def read_docx(file):
     """Read content from docx file"""
@@ -70,8 +65,15 @@ def read_file_content(uploaded_file):
     else:
         return f"[Unsupported file format: {file_ext}]"
 
-def generate_claude_response(file_contents, source_lang, target_lang, api_key):
+def generate_claude_response(file_contents, source_lang, target_lang):
     """Generate response from Claude API"""
+    # Try to get the API key from secrets
+    try:
+        api_key = st.secrets["anthropic_api_key"]
+    except Exception as e:
+        st.error(f"Could not retrieve API key from secrets: {str(e)}")
+        return "Error: Could not retrieve API key from secrets. Please make sure you have set the 'anthropic_api_key' in your secrets."
+    
     client = anthropic.Anthropic(api_key=api_key)
     
     # Prepare prompt for Claude
@@ -132,11 +134,6 @@ def main():
     Upload your files, select source and target languages, and get a comprehensive style guide.
     """)
     
-    # API Key input in sidebar
-    st.sidebar.header("API Configuration")
-    api_key = st.sidebar.text_input("Enter your Anthropic API Key:", type="password", value=st.session_state.api_key)
-    st.session_state.api_key = api_key
-    
     # Create two columns for the language selection
     col1, col2 = st.columns(2)
     
@@ -171,59 +168,56 @@ def main():
         
         # Process button
         if st.button("Generate Style Guide"):
-            if not st.session_state.api_key:
-                st.error("Please enter your Anthropic API Key in the sidebar.")
-            else:
-                with st.spinner("Analyzing content and generating style guide..."):
-                    # Extract content from all files
-                    file_contents = []
-                    for file in uploaded_files:
-                        content = read_file_content(file)
-                        file_contents.append(f"Content from {file.name}:\n{content}\n\n")
+            with st.spinner("Analyzing content and generating style guide..."):
+                # Extract content from all files
+                file_contents = []
+                for file in uploaded_files:
+                    content = read_file_content(file)
+                    file_contents.append(f"Content from {file.name}:\n{content}\n\n")
+                
+                combined_content = "\n".join(file_contents)
+                
+                # Generate response using Claude
+                ai_response = generate_claude_response(combined_content, source_lang, target_lang)
+                
+                if ai_response.startswith("Error"):
+                    st.error(ai_response)
+                else:
+                    # Display results
+                    st.success("Style guide generated successfully!")
                     
-                    combined_content = "\n".join(file_contents)
-                    
-                    # Generate response using Claude
-                    ai_response = generate_claude_response(combined_content, source_lang, target_lang, st.session_state.api_key)
-                    
-                    if ai_response.startswith("Error"):
-                        st.error(ai_response)
+                    # Try to identify persona and style guide sections
+                    parts = ai_response.split("\n\n", 1)
+                    if len(parts) > 1:
+                        persona_part = parts[0]
+                        style_guide_part = parts[1]
                     else:
-                        # Display results
-                        st.success("Style guide generated successfully!")
-                        
-                        # Try to identify persona and style guide sections
-                        parts = ai_response.split("\n\n", 1)
-                        if len(parts) > 1:
-                            persona_part = parts[0]
-                            style_guide_part = parts[1]
-                        else:
-                            persona_part = "Persona information"
-                            style_guide_part = ai_response
-                        
-                        # Display the entire response in an expandable section
-                        with st.expander("View Complete Style Guide"):
-                            st.markdown(ai_response)
-                        
-                        # Create download options
-                        st.subheader("Download Style Guide")
-                        
-                        # Option 1: Download as text
-                        st.download_button(
-                            label="Download as Text",
-                            data=ai_response,
-                            file_name=f"translation_style_guide_{source_lang}_to_{target_lang}.txt",
-                            mime="text/plain"
-                        )
-                        
-                        # Option 2: Download as Word document
-                        docx_bytes = create_style_guide_docx(persona_part, style_guide_part)
-                        st.download_button(
-                            label="Download as Word Document",
-                            data=docx_bytes,
-                            file_name=f"translation_style_guide_{source_lang}_to_{target_lang}.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                        )
+                        persona_part = "Persona information"
+                        style_guide_part = ai_response
+                    
+                    # Display the entire response in an expandable section
+                    with st.expander("View Complete Style Guide"):
+                        st.markdown(ai_response)
+                    
+                    # Create download options
+                    st.subheader("Download Style Guide")
+                    
+                    # Option 1: Download as text
+                    st.download_button(
+                        label="Download as Text",
+                        data=ai_response,
+                        file_name=f"translation_style_guide_{source_lang}_to_{target_lang}.txt",
+                        mime="text/plain"
+                    )
+                    
+                    # Option 2: Download as Word document
+                    docx_bytes = create_style_guide_docx(persona_part, style_guide_part)
+                    st.download_button(
+                        label="Download as Word Document",
+                        data=docx_bytes,
+                        file_name=f"translation_style_guide_{source_lang}_to_{target_lang}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    )
     else:
         st.info("Please upload files to generate a style guide")
     
@@ -237,12 +231,18 @@ def main():
     # Add explanation of what the app does
     st.sidebar.header("How It Works")
     st.sidebar.write("""
-    1. Enter your Anthropic API Key
-    2. Upload your translation files
-    3. Select source and target languages
-    4. Click 'Generate Style Guide'
-    5. Review the generated style guide
-    6. Download in your preferred format
+    1. Upload your translation files
+    2. Select source and target languages
+    3. Click 'Generate Style Guide'
+    4. Review the generated style guide
+    5. Download in your preferred format
+    """)
+    
+    # Add note about API key
+    st.sidebar.header("API Key")
+    st.sidebar.write("""
+    This application uses Claude AI from Anthropic. 
+    The API key should be configured in your Streamlit secrets.
     """)
     
     # Add footer
