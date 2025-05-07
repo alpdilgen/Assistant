@@ -2,7 +2,6 @@ import streamlit as st
 import os
 import json
 import pandas as pd
-import tempfile
 import anthropic
 import docx
 from PyPDF2 import PdfReader
@@ -15,7 +14,7 @@ st.set_page_config(
     page_title="Translation Assistant",
     page_icon="🌍",
     layout="centered",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
 # App title and description
@@ -257,7 +256,7 @@ def extract_glossary_terms(text, source_language, target_language):
             if table_started and set(line.replace('|', '').replace('-', '').replace(' ', '')) == set():
                 continue
                 
-            if table_started:
+            if table_started or '|' in line:  # Also accept tables without headers
                 # Extract columns from the line
                 columns = [col.strip() for col in line.split('|')]
                 columns = [col for col in columns if col]  # Remove empty entries
@@ -278,106 +277,14 @@ def extract_glossary_terms(text, source_language, target_language):
             st.success(f"Successfully extracted {len(terms)} glossary terms!")
             return terms
         else:
-            st.warning("Could not extract glossary terms from table format. Trying direct query...")
-            return request_glossary_direct(source_language, target_language, text)
+            st.warning("Could not extract glossary terms from table format. Please check the response.")
+            return []
             
     except Exception as e:
         st.error(f"Error extracting glossary terms: {e}")
-        st.warning("Attempting direct glossary extraction...")
-        return request_glossary_direct(source_language, target_language, text)
-
-# Function to directly request a glossary
-def request_glossary_direct(source_language, target_language, analysis_text=None):
-    """Request a glossary directly from Claude"""
-    try:
-        client = get_anthropic_client()
-        if not client:
-            st.error("Could not initialize Anthropic client for glossary extraction")
-            return []
-        
-        extraction_prompt = f"""
-        Create a comprehensive glossary for translation from {source_language} to {target_language} based on the document analysis below.
-        
-        Format the glossary as a table with these exact columns:
-        | {source_language} Term | {target_language} Translation | English Reference | Example |
-        
-        Include AT LEAST [number] terms and domain-specific terminology.
-        Do not translate all words - focus on specialized terms and important phrases.
-        
-        Analysis context:
-        {analysis_text[:4000] if analysis_text else "Related to hospitality, tourism, and spa services."}
-        """
-        
-        # Replace [number] with an appropriate target based on language complexity
-        if source_language in ["Bulgarian", "Romanian", "Hungarian", "Czech", "Turkish", "Arabic", "Russian", "Japanese", "Chinese"]:
-            extraction_prompt = extraction_prompt.replace("[number]", "80")
-        else:
-            extraction_prompt = extraction_prompt.replace("[number]", "50")
-        
-        st.info("Making direct glossary request...")
-        message = client.messages.create(
-            model="claude-3-opus-20240229",  # Use the most capable model for terminology
-            max_tokens=4000,
-            temperature=0.1,
-            system="You are a terminology expert specialized in creating comprehensive multilingual glossaries with accurate translations. Generate a detailed professional glossary with as many terms as possible.",
-            messages=[
-                {"role": "user", "content": extraction_prompt}
-            ]
-        )
-        
-        extraction_result = message.content[0].text
-        
-        # Process the response
-        terms = []
-        lines = extraction_result.split('\n')
-        table_started = False
-        
-        for line in lines:
-            # Skip empty lines and lines without pipes
-            if not line.strip() or '|' not in line:
-                continue
-                
-            # Skip header and separator rows
-            if any(header in line.lower() for header in ['term', 'source', 'target', 'translation', 'english', 'example']):
-                table_started = True
-                continue
-                
-            if '---' in line or '===' in line:
-                continue
-                
-            if table_started:
-                # Extract columns from the line
-                columns = [col.strip() for col in line.split('|')]
-                columns = [col for col in columns if col]  # Remove empty entries
-                
-                if len(columns) >= 2:
-                    term = {
-                        'source_term': columns[0],
-                        'target_term': columns[1],
-                        'english_reference': columns[2] if len(columns) > 2 else '',
-                        'example': columns[3] if len(columns) > 3 else ''
-                    }
-                    
-                    # Only add if we have non-empty source and target terms
-                    if term['source_term'] and term['target_term']:
-                        terms.append(term)
-        
-        if terms:
-            st.success(f"Successfully extracted {len(terms)} glossary terms via direct query!")
-            return terms
-        else:
-            st.warning("All extraction methods failed. Creating minimal glossary.")
-            return [{"source_term": "Extraction Failed", 
-                     "target_term": "Please check the analysis document for terminology", 
-                     "english_reference": "", 
-                     "example": ""}]
-    
-    except Exception as e:
-        st.error(f"Error in direct glossary request: {e}")
-        return [{"source_term": "Extraction Error", 
-                 "target_term": f"Error: {str(e)}", 
-                 "english_reference": "", 
-                 "example": ""}]
+        import traceback
+        st.error(traceback.format_exc())
+        return []
 
 # Function to create Excel file from glossary terms
 def create_glossary_excel(terms):
@@ -414,303 +321,168 @@ def create_glossary_excel(terms):
         st.error(f"Error creating Excel file: {e}")
         return None
 
-# Function to make a combined analysis and glossary API call (to avoid rate limits)
-def generate_combined_analysis_and_glossary(source_language, target_language, combined_content, model, analysis_style):
-    client = get_anthropic_client()
-    if not client:
-        st.error("Could not initialize Anthropic client")
-        return None, None
+# Initialize session state if not already initialized
+if 'file_contents' not in st.session_state:
+    st.session_state.file_contents = []
     
-    # Create a combined prompt that requests both analysis and glossary
-    if analysis_style == "Detailed (with translator persona)":
-        combined_prompt = f"""
-        I need you to provide two separate and complete analyses of these {source_language} documents for translation into {target_language}:
+if 'extracted_text' not in st.session_state:
+    st.session_state.extracted_text = ""
+    
+if 'source_language' not in st.session_state:
+    st.session_state.source_language = ""
+    
+if 'target_language' not in st.session_state:
+    st.session_state.target_language = ""
+    
+if 'analysis_result' not in st.session_state:
+    st.session_state.analysis_result = ""
+    
+if 'glossary_terms' not in st.session_state:
+    st.session_state.glossary_terms = []
 
-        PART 1: CONTENT ANALYSIS
-        
-        1. Analysis of the Content and Subject Matter:
-           - Identify the specific organization, company, or entity these documents belong to
-           - Name the specific location mentioned in the documents
-           - Categorize each document individually (Document 1, Document 2, etc.) with its purpose
-           - List the key topics and services covered in each document
-           - Identify the content domain and any specialized fields involved
-        
-        2. Translator Persona: {source_language} to {target_language} Specialist
-           - Give the persona a name that would be appropriate for a {target_language} native speaker
-           - Specialization: Clearly state their expertise relevant to these documents
-           - Background:
-             * Education details (university, degree)
-             * Years of experience
-             * Specialized training relevant to the document domains
-             * Language proficiency levels
-             * Previous relevant work experience
-           - Translation Approach:
-             * How they handle register (formal/informal)
-             * How they handle specialized terminology
-             * Cultural adaptation approaches
-             * Consistency strategies
-             * How they handle legal or technical content
-             * Tone preservation techniques
-        
-        PART 2: GLOSSARY OF TERMS
-        
-        After the analysis, please provide a comprehensive glossary formatted as a markdown table with the following columns:
-        | {source_language} Term | {target_language} Translation | English Reference | Example |
-        
-        For the glossary:
-        - Include AT LEAST 80 domain-specific terms from the documents
-        - Focus on specialized terminology relevant to the document domain
-        - Provide accurate {target_language} translations
-        - Include an English reference term for each entry
-        - Where possible, include an example phrase from the original documents
-        
-        Here are the document contents:
-        
-        {combined_content}
-        """
+# Sidebar with steps
+st.sidebar.header("Steps to Follow")
+st.sidebar.markdown("""
+1. Upload your documents
+2. Select source and target languages
+3. Click "Extract Text" to process files
+4. Click "Analyze Content" to get document analysis
+5. Click "Generate Glossary" to create terminology
+""")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("""
+### About Rate Limits
+This app separates the analysis and glossary processes to avoid hitting API rate limits. 
+Wait at least 1 minute between steps to ensure you stay within the 10,000 tokens per minute limit.
+""")
+
+# File upload section
+st.subheader("1. Upload Documents")
+uploaded_files = st.file_uploader(
+    "Upload Documents (TXT, DOCX, PDF):",
+    type=["txt", "docx", "pdf"],
+    accept_multiple_files=True,
+    key="file_uploader"
+)
+
+# Language selection
+st.subheader("2. Select Languages")
+col1, col2 = st.columns(2)
+
+with col1:
+    source_language = st.selectbox(
+        "Source Language:",
+        options=[
+            "English", "Spanish", "French", "German", "Italian", 
+            "Bulgarian", "Romanian", "Turkish", "Chinese", "Japanese", 
+            "Russian", "Arabic", "Portuguese", "Dutch", "Greek", 
+            "Polish", "Swedish", "Czech", "Hungarian"
+        ],
+        key="source_language_select"
+    )
+
+with col2:
+    target_language = st.selectbox(
+        "Target Language:",
+        options=[
+            "English", "Spanish", "French", "German", "Italian", 
+            "Bulgarian", "Romanian", "Turkish", "Chinese", "Japanese", 
+            "Russian", "Arabic", "Portuguese", "Dutch", "Greek", 
+            "Polish", "Swedish", "Czech", "Hungarian"
+        ],
+        key="target_language_select"
+    )
+
+# Extract text button
+if st.button("Extract Text from Documents"):
+    if not uploaded_files:
+        st.error("Please upload at least one file.")
     else:
-        # Basic analysis prompt
-        combined_prompt = f"""
-        I need you to provide two separate analyses of these {source_language} documents for translation into {target_language}:
+        # Clear previous data
+        st.session_state.file_contents = []
+        st.session_state.extracted_text = ""
         
-        PART 1: CONTENT ANALYSIS
+        # Show progress
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        status_text.text("Processing files...")
         
-        Provide a brief analysis:
-        - Main subject matter (what type of documents are these?)
-        - Primary content areas and domain
-        - Key challenges for translation
-        
-        PART 2: GLOSSARY OF TERMS
-        
-        After the analysis, please provide a comprehensive glossary formatted as a markdown table with the following columns:
-        | {source_language} Term | {target_language} Translation | English Reference | Example |
-        
-        For the glossary:
-        - Include AT LEAST 80 domain-specific terms from the documents
-        - Focus on specialized terminology relevant to the document domain
-        - Provide accurate {target_language} translations
-        - Include an English reference term for each entry
-        - Where possible, include an example phrase from the original documents
-        
-        Here are the document contents:
-        
-        {combined_content}
-        """
-    
-    # Make a single API call for both parts
-    try:
-        message = client.messages.create(
-            model=model,
-            max_tokens=4000,
-            temperature=0.1,
-            system="You are an expert translator analyzing documents for translation. First provide detailed document analysis, then create a comprehensive terminology glossary with at least 80 domain-specific terms.",
-            messages=[
-                {"role": "user", "content": combined_prompt}
-            ]
-        )
-        
-        combined_result = message.content[0].text
-        
-        # Split the result into analysis and glossary parts
-        if "PART 2: GLOSSARY OF TERMS" in combined_result:
-            parts = combined_result.split("PART 2: GLOSSARY OF TERMS", 1)
-            analysis_result = parts[0].strip()
-            glossary_result = parts[1].strip() if len(parts) > 1 else ""
-        elif "## Glossary of Terms" in combined_result:
-            parts = combined_result.split("## Glossary of Terms", 1)
-            analysis_result = parts[0].strip()
-            glossary_result = "## Glossary of Terms" + parts[1].strip() if len(parts) > 1 else ""
-        elif "|" in combined_result:
-            # If there's a table, use that as a separator
-            lines = combined_result.split("\n")
-            table_start = -1
+        # Extract text from uploaded files
+        for i, file in enumerate(uploaded_files):
+            progress = (i / len(uploaded_files))
+            progress_bar.progress(progress)
+            status_text.text(f"Extracting text from {file.name}...")
             
-            for i, line in enumerate(lines):
-                if "|" in line and (i+1 < len(lines) and "---" in lines[i+1]):
-                    table_start = i
-                    break
-            
-            if table_start > 0:
-                analysis_result = "\n".join(lines[:table_start-1]).strip()
-                glossary_result = "\n".join(lines[table_start-1:]).strip()
-            else:
-                analysis_result = combined_result
-                glossary_result = ""
-        else:
-            # Fallback
-            analysis_result = combined_result
-            glossary_result = ""
+            content = extract_text_from_file(file)
+            if content:
+                st.session_state.file_contents.append(content)
         
-        return analysis_result, glossary_result
+        # Update progress
+        progress_bar.progress(1.0)
+        status_text.text("Text extraction complete!")
         
-    except Exception as e:
-        st.error(f"Error in combined API call: {e}")
-        import traceback
-        st.error(traceback.format_exc())
-        return None, None
+        # Combine content
+        st.session_state.extracted_text = "\n\n".join(st.session_state.file_contents)
+        
+        # Store selected languages
+        st.session_state.source_language = source_language
+        st.session_state.target_language = target_language
+        
+        # Show preview
+        char_count = len(st.session_state.extracted_text)
+        token_estimate = char_count // 4  # Rough estimate
+        
+        st.success(f"Successfully extracted text from {len(st.session_state.file_contents)} files.")
+        st.info(f"Total character count: {char_count} (approximately {token_estimate} tokens)")
+        
+        with st.expander("Preview Extracted Text"):
+            st.text_area("Content Sample", st.session_state.extracted_text[:1000] + "...", height=200)
 
-# Create form for user input
-with st.form("translation_form"):
-    # Language Selection
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        source_language = st.selectbox(
-            "Source Language:",
-            options=[
-                "English", "Spanish", "French", "German", "Italian", 
-                "Bulgarian", "Romanian", "Turkish", "Chinese", "Japanese", 
-                "Russian", "Arabic", "Portuguese", "Dutch", "Greek", 
-                "Polish", "Swedish", "Czech", "Hungarian"
-            ],
-            key="source_language"
-        )
-    
-    with col2:
-        target_language = st.selectbox(
-            "Target Language:",
-            options=[
-                "English", "Spanish", "French", "German", "Italian", 
-                "Bulgarian", "Romanian", "Turkish", "Chinese", "Japanese", 
-                "Russian", "Arabic", "Portuguese", "Dutch", "Greek", 
-                "Polish", "Swedish", "Czech", "Hungarian"
-            ],
-            key="target_language"
-        )
-    
-    # File Uploader
-    uploaded_files = st.file_uploader(
-        "Upload Documents (TXT, DOCX, PDF):",
-        type=["txt", "docx", "pdf"],
-        accept_multiple_files=True
-    )
-    
-    # Model selection
-    model = st.selectbox(
-        "AI Model:",
-        options=["claude-3-5-sonnet-20240620", "claude-3-opus-20240229", "claude-3-haiku-20240307"],
-        index=1,  # Default to claude-3-opus for better analysis
-        help="Select the Claude model to use. Opus is more powerful but slower, Haiku is faster but less capable."
-    )
-    
-    # Analysis style selection
-    analysis_style = st.radio(
-        "Analysis Style:",
-        options=["Detailed (with translator persona)", "Basic"],
-        index=0,  # Default to detailed
-        help="Detailed creates a full analysis with persona. Basic provides minimal analysis."
-    )
+# Analysis section
+st.subheader("3. Analyze Content")
 
-    # API mode to avoid rate limits
-    api_mode = st.radio(
-        "API Mode:",
-        options=["Single Call (recommended)", "Separate Calls"],
-        index=0,  # Default to single call
-        help="Single Call avoids rate limits but may have less detailed results. Separate Calls gives better quality but may hit rate limits."
-    )
-    
-    # Submit button
-    submit_button = st.form_submit_button("Generate Translation Resources")
+# Model selection for analysis
+analysis_model = st.selectbox(
+    "Analysis Model:",
+    options=["claude-3-5-sonnet-20240620", "claude-3-opus-20240229", "claude-3-haiku-20240307"],
+    index=1,  # Default to claude-3-opus
+    help="Select the Claude model to use for content analysis. Opus gives more detailed results but uses more tokens."
+)
 
-# Process files when form is submitted
-if submit_button and uploaded_files:
-    # Check if API key is configured
-    client = get_anthropic_client()
-    if not client:
-        st.error("Anthropic API key is not configured. Please check your configuration.")
-        st.stop()
-    
-    if not source_language or not target_language:
+# Analysis style selection
+analysis_style = st.radio(
+    "Analysis Style:",
+    options=["Detailed (with translator persona)", "Basic"],
+    index=0,  # Default to detailed
+    help="Detailed creates a full analysis with persona. Basic provides minimal analysis."
+)
+
+# Analysis button
+if st.button("Analyze Content"):
+    if not st.session_state.file_contents or not st.session_state.extracted_text:
+        st.error("Please extract text from documents first.")
+    elif not st.session_state.source_language or not st.session_state.target_language:
         st.error("Please select both source and target languages.")
-        st.stop()
-    
-    if source_language == target_language:
+    elif st.session_state.source_language == st.session_state.target_language:
         st.error("Source and target languages must be different.")
-        st.stop()
-    
-    # Show progress
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    status_text.text("Processing files...")
-    
-    # Extract text from uploaded files
-    file_contents = []
-    for i, file in enumerate(uploaded_files):
-        progress = (i / len(uploaded_files)) * 0.3  # 30% of progress for file extraction
-        progress_bar.progress(progress)
-        status_text.text(f"Extracting text from {file.name}...")
-        
-        content = extract_text_from_file(file)
-        if content:
-            file_contents.append(content)
-    
-    # Debug file contents
-    if file_contents:
-        with st.expander("Debug: View Extracted File Contents"):
-            for i, content in enumerate(file_contents):
-                st.text(f"File {i+1} content preview (first 500 chars):")
-                preview = content[:500] + "..." if len(content) > 500 else content
-                st.text(preview)
-                st.text(f"Character count: {len(content)}")
     else:
-        st.error("No content was extracted from the uploaded files.")
-        st.stop()
-    
-    # Update progress
-    progress_bar.progress(0.3)
-    status_text.text("Analyzing content with Claude...")
-    
-    # Ensure there is actual content to process
-    combined_content = "\n\n".join(file_contents)
-    if not combined_content.strip():
-        st.error("The extracted file content appears to be empty. Please check that your files contain text that can be properly extracted.")
-        st.stop()
-
-    # Show total character count
-    character_count = len(combined_content)
-    token_estimate = character_count // 4  # Rough estimate
-    st.info(f"Total character count: {character_count} (est. {token_estimate} tokens)")
-    
-    # Check if content is too long and truncate if necessary
-    max_tokens = 90000  # Maximum safe input size
-    if token_estimate > max_tokens:
-        st.warning(f"Content may be too large for analysis. Truncating to approximately {max_tokens} tokens.")
-        combined_content = combined_content[:max_tokens*4]  # Truncate to max token limit
-    
-    # Add a small example if the content is too short (for testing)
-    if len(combined_content) < 10:
-        st.warning("The extracted content is very short. Adding example text for testing.")
-        if source_language == "Bulgarian":
-            combined_content += """
-            Пример текст на български:
-            Здравейте! Това е пример за текст на български. Тук може да добавите вашия собствен текст.
-            Използвайте реален текст, за да получите по-добри резултати от анализа.
-            """
-    
-    # Process the content based on selected API mode
-    try:
-        if api_mode == "Single Call (recommended)":
-            # Use combined API call approach to avoid rate limits
-            status_text.text("Sending request to Claude (combined analysis and glossary)...")
-            progress_bar.progress(0.4)
+        # Initialize Anthropic client
+        client = get_anthropic_client()
+        if not client:
+            st.error("Anthropic API key is not configured properly.")
+            st.stop()
             
-            analysis_result, glossary_result = generate_combined_analysis_and_glossary(
-                source_language, target_language, combined_content, model, analysis_style
-            )
-            
-            if not analysis_result:
-                st.error("Failed to generate analysis. Please try again with smaller files or use a different model.")
-                st.stop()
-                
-            progress_bar.progress(0.8)
-            status_text.text("Processing results...")
-            
-        else:  # Separate Calls mode
-            # Use two separate API calls (may hit rate limits)
-            # Create analysis prompt for Claude
+        # Show progress
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        status_text.text("Analyzing content...")
+        
+        try:
+            # Create analysis prompt based on style
             if analysis_style == "Detailed (with translator persona)":
                 analysis_prompt = f"""
-                I need you to analyze these {source_language} documents for translation into {target_language}. Please:
+                I need you to analyze these {st.session_state.source_language} documents for translation into {st.session_state.target_language}. Please:
                 
                 1. Analysis of the Content and Subject Matter:
                    - Identify the specific organization, company, or entity these documents belong to
@@ -719,8 +491,8 @@ if submit_button and uploaded_files:
                    - List the key topics and services covered in each document
                    - Identify the content domain and any specialized fields involved
                 
-                2. Translator Persona: {source_language} to {target_language} Specialist
-                   - Give the persona a name that would be appropriate for a {target_language} native speaker
+                2. Translator Persona: {st.session_state.source_language} to {st.session_state.target_language} Specialist
+                   - Give the persona a name that would be appropriate for a {st.session_state.target_language} native speaker
                    - Specialization: Clearly state their expertise relevant to these documents
                    - Background:
                      * Education details (university, degree)
@@ -740,12 +512,12 @@ if submit_button and uploaded_files:
                 
                 Here are the document contents:
                 
-                {combined_content}
+                {st.session_state.extracted_text}
                 """
             else:
                 # Basic analysis prompt
                 analysis_prompt = f"""
-                Provide a brief analysis of these {source_language} documents for translation into {target_language}:
+                Provide a brief analysis of these {st.session_state.source_language} documents for translation into {st.session_state.target_language}:
                 
                 1. Main subject matter (what type of documents are these?)
                 2. Primary content areas and domain
@@ -755,36 +527,15 @@ if submit_button and uploaded_files:
                 
                 Here are the document contents:
                 
-                {combined_content}
+                {st.session_state.extracted_text}
                 """
                 
-            # Create glossary prompt
-            glossary_prompt = f"""
-            I need you to create a comprehensive glossary of terms from these {source_language} documents for translation into {target_language}.
-            
-            Format the glossary as a table with these exact columns:
-            | {source_language} Term | {target_language} Translation | English Reference | Example |
-            
-            Guidelines:
-            - Include AT LEAST 80 domain-specific terms from the documents
-            - Focus on specialized terminology relevant to the document domain
-            - Provide accurate {target_language} translations
-            - Include an English reference term for each entry
-            - Where possible, include an example phrase from the original documents
-            - DO NOT include common words unless they have a specialized meaning in this context
-            - DO NOT include explanations or notes outside the table
-            
-            Here are the document contents:
-            
-            {combined_content}
-            """
+            progress_bar.progress(0.3)
+            status_text.text("Sending request to Claude...")
             
             # Make API request to Claude for analysis
-            status_text.text("Generating content analysis and translator persona...")
-            progress_bar.progress(0.4)
-            
-            analysis_message = client.messages.create(
-                model=model,
+            message = client.messages.create(
+                model=analysis_model,
                 max_tokens=4000,
                 temperature=0.1,
                 system="You are an expert document analyst specializing in translation preparation. You identify document types, subject matter, and create detailed translator personas with backgrounds and specialized approaches.",
@@ -794,18 +545,105 @@ if submit_button and uploaded_files:
             )
             
             # Get analysis response content
-            analysis_result = analysis_message.content[0].text
+            st.session_state.analysis_result = message.content[0].text
             
-            # Update progress
-            progress_bar.progress(0.6)
-            status_text.text("Generating comprehensive terminology glossary...")
+            progress_bar.progress(1.0)
+            status_text.text("Analysis complete!")
             
-            # Wait a bit to avoid rate limits
-            time.sleep(3)
+            # Show analysis preview
+            st.success("Document analysis completed successfully!")
+            
+            with st.expander("Preview Analysis"):
+                st.markdown(st.session_state.analysis_result)
+                
+            # Create Word document with analysis
+            docx_data = save_analysis_as_word(st.session_state.analysis_result)
+            
+            if docx_data:
+                st.download_button(
+                    label="📝 Download Analysis Document",
+                    data=docx_data,
+                    file_name=f"analysis_{st.session_state.source_language}_to_{st.session_state.target_language}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    key="download_analysis"
+                )
+            
+        except Exception as e:
+            st.error(f"Error analyzing content: {str(e)}")
+            import traceback
+            st.error(traceback.format_exc())
+            progress_bar.empty()
+            status_text.empty()
+
+# Glossary section
+st.subheader("4. Generate Terminology Glossary")
+
+# Model selection for glossary
+glossary_model = st.selectbox(
+    "Glossary Model:",
+    options=["claude-3-5-sonnet-20240620", "claude-3-opus-20240229", "claude-3-haiku-20240307"],
+    index=1,  # Default to claude-3-opus
+    help="Select the Claude model to use for terminology extraction. Opus gives more comprehensive terms but uses more tokens."
+)
+
+# Term count selection
+term_count = st.slider(
+    "Minimum Number of Terms:",
+    min_value=20,
+    max_value=200,
+    value=80,
+    step=10,
+    help="Target number of terms to extract. Higher numbers give more comprehensive glossaries but use more tokens."
+)
+
+# Glossary button
+if st.button("Generate Glossary"):
+    if not st.session_state.file_contents or not st.session_state.extracted_text:
+        st.error("Please extract text from documents first.")
+    elif not st.session_state.source_language or not st.session_state.target_language:
+        st.error("Please select both source and target languages.")
+    elif st.session_state.source_language == st.session_state.target_language:
+        st.error("Source and target languages must be different.")
+    else:
+        # Initialize Anthropic client
+        client = get_anthropic_client()
+        if not client:
+            st.error("Anthropic API key is not configured properly.")
+            st.stop()
+            
+        # Show progress
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        status_text.text("Generating glossary...")
+        
+        try:
+            # Create glossary prompt
+            glossary_prompt = f"""
+            I need you to create a comprehensive glossary of terms from these {st.session_state.source_language} documents for translation into {st.session_state.target_language}.
+            
+            Format the glossary as a table with these exact columns:
+            | {st.session_state.source_language} Term | {st.session_state.target_language} Translation | English Reference | Example |
+            
+            Guidelines:
+            - Include AT LEAST {term_count} domain-specific terms from the documents
+            - Focus on specialized terminology relevant to the document domain
+            - Provide accurate {st.session_state.target_language} translations
+            - Include an English reference term for each entry
+            - Where possible, include an example phrase from the original documents
+            - DO NOT include common words unless they have a specialized meaning in this context
+            - DO NOT include explanations or notes outside the table
+            
+            Here are the document contents:
+            
+            {st.session_state.extracted_text}
+            """
+            
+            progress_bar.progress(0.3)
+            status_text.text("Sending request to Claude...")
             
             # Make API request to Claude for glossary
-            glossary_message = client.messages.create(
-                model="claude-3-opus-20240229",  # Use Opus for best terminology results
+            message = client.messages.create(
+                model=glossary_model,
                 max_tokens=4000,
                 temperature=0.1,
                 system="You are a terminology specialist expert in creating comprehensive multilingual glossaries. You extract ALL domain-specific terms from documents and provide accurate translations without summarizing or reducing the number of terms.",
@@ -815,102 +653,80 @@ if submit_button and uploaded_files:
             )
             
             # Get glossary response content
-            glossary_result = glossary_message.content[0].text
+            glossary_result = message.content[0].text
             
-            # Update progress
-            progress_bar.progress(0.8)
-            status_text.text("Processing glossary and preparing documents...")
-        
-        # Extract glossary terms
-        glossary_terms = extract_glossary_terms(glossary_result, source_language, target_language)
-        
-        # Create Excel file
-        excel_data = create_glossary_excel(glossary_terms)
-        
-        # Create Word document with analysis only
-        docx_data = save_analysis_as_word(analysis_result)
-        
-        # Update progress
-        progress_bar.progress(1.0)
-        status_text.text("Complete!")
-        
-        # Show success message
-        st.success(f"Successfully generated translation resources for {source_language} to {target_language} with {len(glossary_terms)} glossary terms!")
-        
-        # Create a combined ZIP file with both documents
-        if excel_data is not None and docx_data is not None:
-            # Create a ZIP file in memory
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED, False) as zip_file:
-                # Add Excel file to ZIP
-                zip_file.writestr(f"glossary_{source_language}_to_{target_language}.xlsx", excel_data.getvalue())
-                
-                # Add Word file to ZIP
-                zip_file.writestr(f"analysis_{source_language}_to_{target_language}.docx", docx_data.getvalue())
+            progress_bar.progress(0.7)
+            status_text.text("Extracting terms...")
             
-            # Reset buffer position
-            zip_buffer.seek(0)
+            # Extract glossary terms
+            st.session_state.glossary_terms = extract_glossary_terms(glossary_result, st.session_state.source_language, st.session_state.target_language)
             
-            # Create download button for ZIP file
-            st.download_button(
-                label="📦 Download All Translation Resources (ZIP)",
-                data=zip_buffer,
-                file_name=f"translation_resources_{source_language}_to_{target_language}.zip",
-                mime="application/zip"
-            )
-
-        # Also show individual download buttons
-        st.markdown("### Individual Files")
-        st.markdown("If you prefer to download files separately, use these buttons:")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if excel_data is not None:
-                st.download_button(
-                    label="📊 Download Glossary Only",
-                    data=excel_data,
-                    file_name=f"glossary_{source_language}_to_{target_language}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="download_glossary"
-                )
-                
-        with col2:
-            if docx_data is not None:
-                st.download_button(
-                    label="📝 Download Analysis Only",
-                    data=docx_data,
-                    file_name=f"analysis_{source_language}_to_{target_language}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    key="download_analysis"
-                )
-        
-        # Show preview of analysis and glossary
-        with st.expander("Preview Analysis"):
-            st.markdown(analysis_result)
+            progress_bar.progress(0.9)
+            status_text.text("Creating Excel file...")
             
-        with st.expander("Preview Glossary (First 10 Terms)"):
-            if glossary_terms and len(glossary_terms) > 0:
-                df_preview = pd.DataFrame(glossary_terms[:10])
-                st.dataframe(df_preview.rename(columns={
-                    'source_term': 'Source Term',
-                    'target_term': 'Target Translation',
-                    'english_reference': 'English Reference',
-                    'example': 'Example'
-                }))
-                st.info(f"Total terms in glossary: {len(glossary_terms)}")
+            # Create Excel file
+            excel_data = create_glossary_excel(st.session_state.glossary_terms)
+            
+            progress_bar.progress(1.0)
+            status_text.text("Glossary generation complete!")
+            
+            # Show glossary preview
+            st.success(f"Successfully extracted {len(st.session_state.glossary_terms)} glossary terms!")
+            
+            if st.session_state.glossary_terms and len(st.session_state.glossary_terms) > 0:
+                with st.expander("Preview Glossary (First 10 Terms)"):
+                    df_preview = pd.DataFrame(st.session_state.glossary_terms[:10])
+                    st.dataframe(df_preview.rename(columns={
+                        'source_term': 'Source Term',
+                        'target_term': 'Target Translation',
+                        'english_reference': 'English Reference',
+                        'example': 'Example'
+                    }))
+                    
+                if excel_data:
+                    st.download_button(
+                        label="📊 Download Glossary Excel File",
+                        data=excel_data,
+                        file_name=f"glossary_{st.session_state.source_language}_to_{st.session_state.target_language}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="download_glossary"
+                    )
+                    
+                # Check if analysis is also available to create ZIP
+                if st.session_state.analysis_result:
+                    # Create a combined ZIP file
+                    docx_data = save_analysis_as_word(st.session_state.analysis_result)
+                    
+                    if excel_data is not None and docx_data is not None:
+                        # Create a ZIP file in memory
+                        zip_buffer = io.BytesIO()
+                        with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED, False) as zip_file:
+                            # Add Excel file to ZIP
+                            zip_file.writestr(f"glossary_{st.session_state.source_language}_to_{st.session_state.target_language}.xlsx", excel_data.getvalue())
+                            
+                            # Add Word file to ZIP
+                            zip_file.writestr(f"analysis_{st.session_state.source_language}_to_{st.session_state.target_language}.docx", docx_data.getvalue())
+                        
+                        # Reset buffer position
+                        zip_buffer.seek(0)
+                        
+                        # Create download button for ZIP file
+                        st.download_button(
+                            label="📦 Download Complete Translation Package (ZIP)",
+                            data=zip_buffer,
+                            file_name=f"translation_resources_{st.session_state.source_language}_to_{st.session_state.target_language}.zip",
+                            mime="application/zip",
+                            key="download_zip"
+                        )
             else:
-                st.warning("No glossary terms to preview")
-        
-    except Exception as e:
-        st.error(f"Error processing request: {str(e)}")
-        import traceback
-        st.error(traceback.format_exc())
-        progress_bar.empty()
-        status_text.empty()
-
-# Show information when no files are uploaded
-elif submit_button and not uploaded_files:
-    st.error("Please upload at least one file.")
+                st.warning("No glossary terms were extracted. Please try again with different settings.")
+            
+        except Exception as e:
+            st.error(f"Error generating glossary: {str(e)}")
+            import traceback
+            st.error(traceback.format_exc())
+            progress_bar.empty()
+            status_text.empty()
 
 # Add footer
 st.markdown("---")
