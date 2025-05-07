@@ -3,7 +3,7 @@ import os
 import json
 import pandas as pd
 import tempfile
-from openai import OpenAI
+import anthropic  # Import Anthropic instead of OpenAI
 import docx
 from PyPDF2 import PdfReader
 import io
@@ -21,15 +21,15 @@ st.set_page_config(
 st.title("Translation Assistant")
 st.write("Upload documents to generate translation resources")
 
-# Function to load OpenAI API key
-def get_openai_client():
+# Function to load Anthropic API key
+def get_anthropic_client():
     try:
         # Try to get API key from secrets
-        api_key = st.secrets.get("OPENAI_API_KEY", None)
+        api_key = st.secrets.get("ANTHROPIC_API_KEY", None)
         
         # If not found in secrets, try environment variable
         if not api_key:
-            api_key = os.environ.get('OPENAI_API_KEY')
+            api_key = os.environ.get('ANTHROPIC_API_KEY')
         
         # If not found in environment, try config file
         if not api_key:
@@ -37,17 +37,17 @@ def get_openai_client():
             if os.path.exists(config_path):
                 with open(config_path, 'r') as f:
                     config = json.load(f)
-                    api_key = config.get('OPENAI_API_KEY')
+                    api_key = config.get('ANTHROPIC_API_KEY')
         
         # If API key is found, create client
         if api_key:
-            # Create OpenAI client without proxies parameter
-            return OpenAI(api_key=api_key)
+            # Create Anthropic client
+            return anthropic.Anthropic(api_key=api_key)
         else:
-            st.error('API key not configured. Please set the OPENAI_API_KEY in config.json, environment, or Streamlit secrets.')
+            st.error('API key not configured. Please set the ANTHROPIC_API_KEY in config.json, environment, or Streamlit secrets.')
             return None
     except Exception as e:
-        st.error(f'Error initializing OpenAI client: {e}')
+        st.error(f'Error initializing Anthropic client: {e}')
         return None
 
 # Function to extract text from files
@@ -105,10 +105,6 @@ def save_analysis_as_word(content):
             if not section.strip():
                 continue
                 
-            # Skip glossary section to avoid duplication
-            if section.lower().startswith('glossary'):
-                continue
-                
             # Split into title and content
             lines = section.split('\n', 1)
             if len(lines) > 0:
@@ -121,9 +117,6 @@ def save_analysis_as_word(content):
                     paragraphs = content.split('\n\n')
                     for para in paragraphs:
                         if para.strip():
-                            # Skip lines with table markers if excluding glossary
-                            if '|' in para:
-                                continue
                             doc.add_paragraph(para)
         
         # Save to BytesIO object
@@ -137,71 +130,47 @@ def save_analysis_as_word(content):
 
 # Function to extract glossary terms
 def extract_glossary_terms(text, source_language, target_language):
-    """Extract glossary terms from the API response with better handling"""
+    """Extract glossary terms from the API response"""
     try:
-        # First, try to find the glossary section
+        # Look for the glossary table
         lines = text.split('\n')
-        glossary_section_start = None
+        table_lines = []
         
-        # Look for the glossary section header
-        for i, line in enumerate(lines):
-            if '## glossary' in line.lower() or '# glossary' in line.lower() or 'glossary:' in line.lower():
-                glossary_section_start = i
-                break
+        # Find any lines that look like a table row
+        for line in lines:
+            if line.strip().startswith('|') and line.strip().endswith('|'):
+                table_lines.append(line)
         
-        # If no explicit glossary section found, look for table markers
-        table_start = None
-        if glossary_section_start is not None:
-            # Look for the table after the glossary section header
-            for i in range(glossary_section_start, len(lines)):
-                if '|' in lines[i]:
-                    table_start = i
-                    break
-        else:
-            # No glossary section found, look for any table in the text
-            for i, line in enumerate(lines):
-                if '|' in line and ('term' in line.lower() or source_language.lower() in line.lower()):
-                    table_start = i
-                    break
-        
-        if table_start is None:
-            st.warning("No glossary table found in the AI response. Will generate an empty glossary file.")
-            # Return a minimal empty structure to still generate the Excel file
-            return [{'source_term': 'No terms extracted', 
-                    'target_term': 'Please check the analysis document', 
-                    'english_reference': '', 
-                    'example': ''}]
+        if not table_lines:
+            st.warning("No glossary table found in the response. Please check the analysis document.")
+            return []
         
         # Process the table
         terms = []
-        current_line = table_start
+        header_found = False
         
-        # Skip header row if it exists
-        if ('term' in lines[current_line].lower() or 
-            source_language.lower() in lines[current_line].lower() or 
-            '---' in lines[current_line] or 
-            '===' in lines[current_line]):
-            current_line += 1
-        
-        # Skip separator row if it exists (contains dashes)
-        if current_line < len(lines) and ('-' in lines[current_line] or 
-                                          '|--' in lines[current_line] or 
-                                          '+--' in lines[current_line]):
-            current_line += 1
-        
-        # Process data rows
-        while current_line < len(lines) and '|' in lines[current_line]:
-            line = lines[current_line]
-            
-            # Skip empty or separator lines
-            if line.strip() == '' or line.strip() == '|' or '--' in line:
-                current_line += 1
+        for line in table_lines:
+            # Skip separator rows
+            if '-+-' in line.replace(' ', '') or '-|-' in line.replace(' ', ''):
                 continue
-            
+                
+            # Skip empty lines
+            if line.strip() == '' or line.strip() == '|':
+                continue
+                
             # Split by pipe and remove leading/trailing whitespace
             columns = [col.strip() for col in line.split('|')]
             # Remove empty entries from start and end
             columns = [col for col in columns if col]
+            
+            # Skip if this looks like a header row
+            if not header_found and (
+                'term' in ' '.join(columns).lower() or 
+                source_language.lower() in ' '.join(columns).lower() or
+                'translation' in ' '.join(columns).lower()
+            ):
+                header_found = True
+                continue
             
             if len(columns) >= 2:
                 term = {
@@ -211,30 +180,28 @@ def extract_glossary_terms(text, source_language, target_language):
                     'example': columns[3] if len(columns) > 3 else ''
                 }
                 terms.append(term)
+        
+        if terms:
+            st.success(f"Successfully extracted {len(terms)} glossary terms!")
+        else:
+            st.warning("Glossary table found but no terms could be extracted.")
             
-            current_line += 1
-        
-        if not terms:
-            st.warning("Glossary table found but no terms could be extracted. Will generate an empty glossary file.")
-            return [{'source_term': 'No terms extracted', 
-                    'target_term': 'Please check the analysis document', 
-                    'english_reference': '', 
-                    'example': ''}]
-        
-        st.success(f"Successfully extracted {len(terms)} glossary terms!")
         return terms
     except Exception as e:
         st.error(f"Error extracting glossary terms: {e}")
-        # Return a minimal structure to still generate the Excel file
-        return [{'source_term': 'Error extracting terms', 
-                'target_term': f'Error: {str(e)}', 
-                'english_reference': '', 
-                'example': ''}]
+        return []
 
 # Function to create Excel file from glossary terms
 def create_glossary_excel(terms):
     """Create Excel file from extracted glossary terms"""
     try:
+        if not terms:
+            # Create a minimal structure if no terms were found
+            terms = [{'source_term': 'No terms extracted', 
+                     'target_term': 'Please check the analysis document', 
+                     'english_reference': '', 
+                     'example': ''}]
+        
         # Create DataFrame with explicit column names
         df = pd.DataFrame(terms)
         
@@ -295,15 +262,23 @@ with st.form("translation_form"):
         accept_multiple_files=True
     )
     
+    # Model selection
+    model = st.selectbox(
+        "AI Model:",
+        options=["claude-3-5-sonnet", "claude-3-opus", "claude-3-haiku"],
+        index=0,  # Default to claude-3-5-sonnet
+        help="Select the Claude model to use. Opus is more powerful but slower, Haiku is faster but less capable."
+    )
+    
     # Submit button
     submit_button = st.form_submit_button("Generate Translation Resources")
 
 # Process files when form is submitted
 if submit_button and uploaded_files:
     # Check if API key is configured
-    client = get_openai_client()
+    client = get_anthropic_client()
     if not client:
-        st.error("OpenAI API key is not configured. Please check your configuration.")
+        st.error("Anthropic API key is not configured. Please check your configuration.")
         st.stop()
     
     if not source_language or not target_language:
@@ -336,53 +311,45 @@ if submit_button and uploaded_files:
     
     # Update progress
     progress_bar.progress(0.3)
-    status_text.text("Analyzing content with AI...")
+    status_text.text("Analyzing content with Claude...")
     
     # Combine file contents
     combined_content = "\n\n".join(file_contents)
     
-    # Create analysis prompt with explicit glossary format instructions
+    # Create analysis prompt for Claude
     analysis_prompt = f"""
     I need you to analyze these {source_language} documents for translation into {target_language}. Please:
-
-    1. Analyze the content and subject matter of these documents
-    2. Create a detailed translator persona specializing in {source_language} to {target_language} translation for this specific content domain
-    3. Create a comprehensive glossary of terms with example sentences from the documents
-    4. VERY IMPORTANT: Format the glossary EXACTLY with this format:
-
-    ## Glossary
-
-    | {source_language} Term | {target_language} Translation | English Reference | Example Sentence |
-    |------------------------|-------------------------------|-------------------|------------------|
-    | Term 1 | Translation 1 | English 1 | Example 1 |
-    | Term 2 | Translation 2 | English 2 | Example 2 |
-
-    You must include the "## Glossary" heading exactly as shown above, followed by the markdown table.
+    
+    1. Analyze the content and subject matter of these documents 
+    2. Create a detailed translator persona specializing in {source_language} to {target_language} translation for this specific content domain 
+    3. Create a comprehensive glossary of terms with example sentences from the documents 
+    4. Format the glossary with {source_language} terms, {target_language} translations, English reference translations, and example sentences from the original documents
+    
     Please don't translate the documents themselves - I just need the analysis and glossary to assist a human translator.
-
+    
     Here are the document contents:
-
+    
     {combined_content}
     """
     
-    # Call OpenAI API
+    # Call Anthropic API
     try:
-        status_text.text("Sending request to OpenAI...")
+        status_text.text("Sending request to Claude...")
         progress_bar.progress(0.4)
         
-        # Make API request
-        response = client.chat.completions.create(
-            model="gpt-4-turbo",
-            messages=[
-                {"role": "system", "content": "You are an expert translator and linguistics specialist."},
-                {"role": "user", "content": analysis_prompt}
-            ],
+        # Make API request to Claude
+        message = client.messages.create(
+            model=model,
             max_tokens=4000,
-            temperature=0
+            temperature=0,
+            system="You are an expert translator and linguistics specialist.",
+            messages=[
+                {"role": "user", "content": analysis_prompt}
+            ]
         )
         
         # Get response content
-        analysis_result = response.choices[0].message.content
+        analysis_result = message.content[0].text
         
         # Update progress
         progress_bar.progress(0.7)
@@ -395,7 +362,7 @@ if submit_button and uploaded_files:
         progress_bar.progress(0.8)
         excel_data = create_glossary_excel(glossary_terms)
         
-        # Create Word document
+        # Create Word document with full analysis
         progress_bar.progress(0.9)
         docx_data = save_analysis_as_word(analysis_result)
         
@@ -468,4 +435,4 @@ elif submit_button and not uploaded_files:
 
 # Add footer
 st.markdown("---")
-st.caption("This application uses AI to analyze documents and create translation resources.")
+st.caption("This application uses Claude AI to analyze documents and create translation resources.")
