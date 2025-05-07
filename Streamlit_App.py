@@ -41,7 +41,7 @@ def get_anthropic_client():
         
         # If API key is found, create client
         if api_key:
-            # Create Anthropic client
+            # Create Anthropic client without any extra parameters
             return anthropic.Anthropic(api_key=api_key)
         else:
             st.error('API key not configured. Please set the ANTHROPIC_API_KEY in config.json, environment, or Streamlit secrets.')
@@ -265,7 +265,7 @@ with st.form("translation_form"):
     # Model selection
     model = st.selectbox(
         "AI Model:",
-        options=["claude-3-5-sonnet", "claude-3-opus", "claude-3-haiku"],
+        options=["claude-3-5-sonnet-20240620", "claude-3-opus-20240229", "claude-3-haiku-20240307"],
         index=0,  # Default to claude-3-5-sonnet
         help="Select the Claude model to use. Opus is more powerful but slower, Haiku is faster but less capable."
     )
