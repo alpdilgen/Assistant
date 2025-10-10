@@ -445,8 +445,8 @@ st.subheader("3. Analyze Content")
 # Model selection for analysis
 analysis_model = st.selectbox(
     "Analysis Model:",
-    options=["claude-3-5-sonnet-20240620", "claude-3-opus-20240229", "claude-3-haiku-20240307"],
-    index=1,  # Default to claude-3-opus
+    options=["claude-sonnet-4-5-2025092"],
+    index=1,  # Default to claude-4-sonnet
     help="Select the Claude model to use for content analysis. Opus gives more detailed results but uses more tokens."
 )
 
@@ -730,4 +730,5 @@ if st.button("Generate Glossary"):
 
 # Add footer
 st.markdown("---")
+
 st.caption("This application uses Claude AI to analyze documents and create translation resources.")
