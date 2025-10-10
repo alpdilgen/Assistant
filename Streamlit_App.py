@@ -581,7 +581,7 @@ st.subheader("4. Generate Terminology Glossary")
 # Model selection for glossary
 glossary_model = st.selectbox(
     "Glossary Model:",
-    options=["claude-3-5-sonnet-20240620", "claude-3-opus-20240229", "claude-3-haiku-20240307"],
+    options=["claude-sonnet-4-5-20250929"],
     index=1,  # Default to claude-3-opus
     help="Select the Claude model to use for terminology extraction. Opus gives more comprehensive terms but uses more tokens."
 )
@@ -732,3 +732,4 @@ if st.button("Generate Glossary"):
 st.markdown("---")
 
 st.caption("This application uses Claude AI to analyze documents and create translation resources.")
+
