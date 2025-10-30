@@ -37,11 +37,19 @@ src/
    ```
 3. (Optional) Install the `termextractor` package locally if you want to use the local extraction strategy.
 
-## Running the App
+## Running Locally
+Run commands from the project root so that Python can resolve the `src` package correctly.
+
 ```bash
-streamlit run src/ui/app.py
+python run_app.py
 ```
-The app will be served on `http://localhost:8501` by default.
+
+This helper simply executes `streamlit run src/ui/app.py` with the correct working directory. You can also invoke Streamlit directly with the same command if you prefer. The app will be served on `http://localhost:8501` by default.
+
+## Running on Streamlit Cloud
+- Repository root must contain the app.
+- Entry point: `src/ui/app.py`.
+- Imports are package-based under `src/`, so no additional path tweaks are required beyond cloning the repository.
 
 ### Docker
 You can also run the application via Docker:
