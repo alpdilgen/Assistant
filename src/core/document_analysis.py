@@ -7,8 +7,6 @@ from collections import Counter
 from statistics import mean
 from typing import Iterable, Optional
 
-from .terminology_client import get_terminology  # re-exported for convenience
-
 SENTENCE_PATTERN = re.compile(r"(?<=[.!?])\s+")
 WORD_PATTERN = re.compile(r"[\w'-]+", re.UNICODE)
 ABBREVIATION_PATTERN = re.compile(r"\b[A-Z]{2,}\b")

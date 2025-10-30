@@ -3,13 +3,12 @@
 An AI-powered Streamlit application that helps language service providers analyse source documents, build draft style guides, prepare translator personas, and generate project manager briefs.
 
 ## Features
-- Upload DOCX, PDF, TXT, XLIFF, or memoQ MQXLIFF files.
-- Automatic document analysis (domain, tone, audience, difficulty).
-- Optional connection to the external [alpdilgen/Termextractor](https://github.com/alpdilgen/Termextractor) project for up-to-date terminology.
-- Draft style guide generation using extracted terminology.
-- LLM-ready translator persona creation.
-- Project manager brief with risks, prerequisites, and QA recommendations.
-- JSON-first outputs with download options for JSON and DOCX artefacts.
+- Upload multiple DOCX, PDF, TXT, XLIFF, or memoQ MQXLIFF files in one go.
+- Automatic document analysis (domain, tone, audience, difficulty) with combined reporting.
+- Draft style guide generation aligned with the Translation Style Guide Questionnaire, including optional PM inputs.
+- LLM-ready translator persona creation and project manager briefs.
+- JSON-first outputs with Word (`.docx`) exports for all key artefacts.
+- Quick hand-off to the hosted [Termextractor](https://termtool.streamlit.app/) tool for terminology creation.
 
 ## Project Structure
 ```
@@ -35,16 +34,16 @@ src/
    ```bash
    pip install -r requirements.txt
    ```
-3. (Optional) Install the `termextractor` package locally if you want to use the local extraction strategy.
+3. Provide any required secrets (LLM keys, etc.) via environment variables or `st.secrets`.
 
 ## Running Locally
 Run commands from the project root so that Python can resolve the `src` package correctly.
 
 ```bash
-python run_app.py
+streamlit run src/ui/app.py
 ```
 
-This helper simply executes `streamlit run src/ui/app.py` with the correct working directory. You can also invoke Streamlit directly with the same command if you prefer. The app will be served on `http://localhost:8501` by default.
+The helper script `python run_app.py` simply executes the same command.
 
 ## Running on Streamlit Cloud
 - Repository root must contain the app.
@@ -58,20 +57,17 @@ docker build -t lsp-assistant .
 docker run -p 8501:8501 lsp-assistant
 ```
 
-## Configuring Terminology Extraction
-The assistant first attempts to import `TermExtractor` from the `termextractor` Python package. Install it in the same environment to use the local strategy. If the import fails, the app falls back to calling a REST endpoint specified by the `TERMINOLOGY_SERVICE_URL` environment variable (default: `https://termextractor-service/api/extract`).
+## Terminology Extraction
+Terminology generation is delegated to the external Termextractor application: <https://termtool.streamlit.app/>. The Streamlit UI links directly to the hosted tool and forwards the selected language pair so the PM can upload the same files there.
 
-Additional environment variables:
-- `TERMINOLOGY_SERVICE_TIMEOUT` (seconds, default `30`)
-
-## LLM Configuration
+## LLM Configuration & Secrets
 LLM usage is optional and controlled by `src/config/settings.yaml` and a sidebar toggle. To enable:
 1. Set `llm.enabled` to `true` in `settings.yaml`.
-2. Provide the appropriate API key via environment variable:
+2. Provide the appropriate API key via environment variables or `st.secrets`.
    - `OPENAI_API_KEY` for OpenAI models.
    - `ANTHROPIC_API_KEY` for Anthropic models.
 
-The prompts used for analysis, style guide enrichment, persona creation, and PM briefs are defined in `settings.yaml`. They can be customised per deployment.
+The prompts used for analysis, style guide enrichment, persona creation, and PM briefs are defined in `settings.yaml`. They can be customised per deployment or overridden via `st.secrets`.
 
 ## Deploying to Streamlit Cloud
 1. Push this repository to your Git hosting provider.

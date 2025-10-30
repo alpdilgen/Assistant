@@ -5,7 +5,10 @@ from dataclasses import dataclass
 import io
 import logging
 import re
-from typing import Iterable, Optional
+from typing import Optional, Sequence, TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - imported for type hints only
+    from streamlit.runtime.uploaded_file_manager import UploadedFile
 
 from pydantic import BaseModel, Field
 
@@ -50,7 +53,7 @@ class XliffContent:
 
 
 def load_documents(
-    uploads: Iterable[tuple[str, bytes]],
+    uploads: Sequence["UploadedFile"],
     *,
     default_source_lang: Optional[str] = None,
     default_target_lang: Optional[str] = None,
@@ -58,7 +61,14 @@ def load_documents(
     """Load multiple uploaded files into :class:`DocumentPayload` objects."""
 
     payloads: list[DocumentPayload] = []
-    for filename, file_bytes in uploads:
+    for uploaded_file in uploads:
+        if uploaded_file is None:
+            continue
+        filename = getattr(uploaded_file, "name", "uploaded_file")
+        file_bytes = uploaded_file.getvalue()
+        if not file_bytes:
+            logger.warning("Skipping empty upload: %s", filename)
+            continue
         payload = load_document(
             filename,
             file_bytes,
