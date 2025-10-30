@@ -1,0 +1,42 @@
+llm:
+  enabled: false
+  provider: openai
+  model: gpt-4o-mini
+  temperature: 0.0
+  max_retries: 2
+  timeout: 60
+languages:
+  - code: en
+    label: English (EN)
+  - code: de
+    label: German (DE)
+  - code: fr
+    label: French (FR)
+document_types:
+  - General
+  - Legal
+  - Technical
+  - Marketing
+prompts:
+  analysis: |
+    You are a senior linguist assisting a language service provider. Analyse the source material described in the payload below.
+    Respond with a strict JSON object containing the keys: summary, domain, subdomains, difficulty_level, tone, audience, complexity_signals.
+    Use the payload to infer reasonable values and avoid additional commentary.
+    Payload:
+    {payload}
+  style_guide: |
+    You are designing a translation style guide. Enrich or adjust the provided baseline style guide in the payload.
+    Respond ONLY with JSON containing the same keys as the input style_guide.
+    Payload:
+    {payload}
+  persona: |
+    You are configuring an LLM translator persona for a professional linguist.
+    Update the persona JSON based on the analysis and style guide in the payload.
+    Respond strictly with JSON.
+    Payload:
+    {payload}
+  pm_brief: |
+    You are an experienced localisation project manager. Refine the project brief using the payload.
+    Respond strictly with JSON and keep existing keys.
+    Payload:
+    {payload}
