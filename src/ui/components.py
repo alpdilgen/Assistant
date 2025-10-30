@@ -34,41 +34,65 @@ def download_json_button(label: str, data: Dict[str, Any], file_name: str) -> No
     st.download_button(label, data=json_bytes, file_name=file_name, mime="application/json")
 
 
-def download_docx_button(label: str, data: Dict[str, Any], file_name: str, title: str) -> None:
+def render_docx_from_dict(payload: Any, title: str) -> bytes:
+    """Serialize dictionaries or lists to DOCX bytes."""
+
     if Document is None:
-        st.warning("python-docx not installed; download as JSON instead.")
-        download_json_button(label, data, file_name.replace(".docx", ".json"))
-        return
+        raise RuntimeError("python-docx is required for DOCX exports")
+
     buffer = io.BytesIO()
     doc = Document()
     doc.add_heading(title, level=1)
-    _write_dict_to_docx(doc, data)
+    _write_value_to_docx(doc, payload)
     doc.save(buffer)
     buffer.seek(0)
-    st.download_button(label, data=buffer.getvalue(), file_name=file_name, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    return buffer.getvalue()
 
 
-def _write_dict_to_docx(doc, data: Dict[str, Any], level: int = 2) -> None:
-    for key, value in data.items():
-        heading_level = min(level, 4)
-        if isinstance(value, (dict, list)):
-            doc.add_heading(str(key).replace("_", " ").title(), level=heading_level)
-            if isinstance(value, dict):
-                _write_dict_to_docx(doc, value, level=heading_level + 1)
+def download_docx_button(label: str, data: Any, file_name: str, title: str) -> None:
+    if Document is None:
+        st.warning("python-docx not installed; download as JSON instead.")
+        download_json_button(label, data if isinstance(data, dict) else {"data": data}, file_name.replace(".docx", ".json"))
+        return
+    try:
+        docx_bytes = render_docx_from_dict(data, title)
+    except RuntimeError as exc:  # pragma: no cover - defensive
+        st.warning(str(exc))
+        download_json_button(label, data if isinstance(data, dict) else {"data": data}, file_name.replace(".docx", ".json"))
+        return
+    st.download_button(
+        label,
+        data=docx_bytes,
+        file_name=file_name,
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+
+
+def _write_value_to_docx(doc, value: Any, heading: str | None = None, level: int = 2) -> None:
+    if heading is not None:
+        doc.add_heading(str(heading).replace("_", " ").title(), level=min(level, 4))
+
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            _write_value_to_docx(doc, nested, heading=key, level=level + 1)
+        return
+
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, (dict, list)):
+                _write_value_to_docx(doc, item, heading=None, level=level + 1)
             else:
-                for item in value:
-                    if isinstance(item, dict):
-                        for sub_key, sub_value in item.items():
-                            doc.add_paragraph(f"{sub_key}: {sub_value}", style="List Bullet")
-                    else:
-                        doc.add_paragraph(str(item), style="List Bullet")
-        else:
-            doc.add_paragraph(f"{key}: {value}")
+                doc.add_paragraph(str(item), style="List Bullet")
+        return
+
+    if value is not None:
+        doc.add_paragraph(str(value))
 
 
 __all__ = [
     "file_uploader",
     "render_json",
     "download_json_button",
+    "render_docx_from_dict",
     "download_docx_button",
 ]
