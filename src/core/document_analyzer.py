@@ -1,129 +1,204 @@
 from __future__ import annotations
 
+import logging
 import re
 from collections import Counter
 from typing import Any, Dict, Iterable, List, Sequence
 
-BREF_KEYWORDS = {
-    "bref",
-    "best available techniques",
-    "cement",
-    "clinker",
-    "kiln",
-    "lime",
-    "magnesium oxide",
-    "mgo",
+logger = logging.getLogger(__name__)
+
+GENERAL_DOMAIN = "General / Technical"
+VALID_COMPLEXITY_DRIVERS = ("terminology_density", "regulatory_refs", "tables", "formulas")
+
+DOMAIN_KEYWORDS: Dict[str, set[str]] = {
+    "Medical / Clinical": {
+        "anamnesis",
+        "cardiology",
+        "clinical",
+        "diagnosis",
+        "epikriza",
+        "hematology",
+        "hospital",
+        "medical",
+        "nephrology",
+        "oncology",
+        "patient",
+        "pharmaceutical",
+        "prescription",
+        "procedure",
+        "prostate",
+        "radiology",
+        "surgery",
+        "therapy",
+        "treatment",
+        "urology",
+    },
+    "Environmental / Industrial": {
+        "abatement",
+        "bref",
+        "cement",
+        "emission",
+        "furnace",
+        "industrial",
+        "kiln",
+        "lime",
+        "magnesium",
+        "magnesium oxide",
+        "mg o",
+        "mgo",
+        "pollutant",
+        "process",
+        "stack",
+        "waste gas",
+    },
+    "Legal / Regulatory": {
+        "article",
+        "compliance",
+        "directive",
+        "law",
+        "legal",
+        "paragraph",
+        "directive (eu)",
+        "regulation (eu)",
+        "decree",
+        "regulation",
+        "section",
+        "subsection",
+    },
 }
 
-DOMAIN_LIBRARY = [
-    {
-        "domain": "Environmental / Industrial processes",
-        "subdomain": "Industrial Emissions (BAT)",
-        "related": ["Environmental compliance", "Process engineering"],
-        "keywords": [
-            "emission",
-            "abatement",
-            "best available technique",
-            "industrial emissions",
-            "stack",
-            "kiln",
-            "dust collector",
-            "sinter",
-            "waste gas",
-        ],
+DOMAIN_METADATA: Dict[str, Dict[str, List[str]]] = {
+    "Medical / Clinical": {
+        "default_subdomains": ["Clinical documentation"],
+        "default_related": ["Healthcare services", "Patient care"],
+        "default_references": ["WHO terminology", "ICD-10", "SNOMED CT"],
     },
-    {
-        "domain": "Legal / Regulatory",
-        "subdomain": "EU legislation",
-        "related": ["Policy", "Compliance", "Contracts"],
-        "keywords": [
-            "directive",
-            "regulation",
-            "article",
-            "paragraph",
-            "commission",
-            "annex",
-        ],
+    "Environmental / Industrial": {
+        "default_subdomains": ["Industrial emissions"],
+        "default_related": ["Process engineering", "Environmental compliance"],
+        "default_references": ["BREF portal", "EU ETS guidance"],
     },
-    {
-        "domain": "Technical / Engineering",
-        "subdomain": "Process engineering",
-        "related": ["Manufacturing", "Automation"],
-        "keywords": [
-            "process",
-            "installation",
-            "equipment",
-            "maintenance",
-            "heat exchanger",
-            "filter",
-            "operation",
-        ],
+    "Legal / Regulatory": {
+        "default_subdomains": ["Legislative documentation"],
+        "default_related": ["Policy", "Compliance"],
+        "default_references": ["EUR-Lex", "Official Journal of the EU"],
     },
-]
+    GENERAL_DOMAIN: {
+        "default_subdomains": ["Technical documentation"],
+        "default_related": ["General technology", "Business communication"],
+        "default_references": ["IATE", "Client reference material"],
+    },
+}
+
+RISK_LIBRARY: Dict[str, List[Dict[str, str]]] = {
+    "Medical / Clinical": [
+        {
+            "name": "Clinical terminology accuracy",
+            "description": "Ensure diagnoses, procedures, and drug names match established medical terminology.",
+            "mitigation": "Engage a subject-matter expert or medically certified linguist for review.",
+        },
+        {
+            "name": "Patient data sensitivity",
+            "description": "Protect patient-identifying information and adhere to confidentiality requirements.",
+            "mitigation": "Apply data protection guidelines and confirm secure handling with the client.",
+        },
+    ],
+    "Environmental / Industrial": [
+        {
+            "name": "Process terminology alignment",
+            "description": "Industrial process steps and equipment must be translated consistently across the project.",
+            "mitigation": "Establish a terminology base and enforce QA using terminology tools.",
+        },
+        {
+            "name": "Emission compliance references",
+            "description": "Regulatory citations must be accurate for compliance and audit readiness.",
+            "mitigation": "Cross-check references against client-provided compliance documentation.",
+        },
+    ],
+    "Legal / Regulatory": [
+        {
+            "name": "Legislative citation precision",
+            "description": "Directive and regulation identifiers must remain exact to avoid legal issues.",
+            "mitigation": "Validate citations on EUR-Lex and confirm with client SMEs.",
+        },
+        {
+            "name": "Terminology consistency",
+            "description": "Legal terms must be used consistently across all deliverables.",
+            "mitigation": "Maintain a bilingual glossary and apply QA checks before delivery.",
+        },
+    ],
+    GENERAL_DOMAIN: [
+        {
+            "name": "General QA",
+            "description": "Large technical projects risk inconsistent tone and formatting across translators.",
+            "mitigation": "Provide unified briefing notes and run bilingual QA before delivery.",
+        }
+    ],
+}
+
+PROMPT_TEMPLATE = (
+    "You are assisting a localisation project manager. Analyse the provided document chunk using the"
+    " metadata supplied below. Respond strictly in JSON with UTF-8 encoding and double quotes. The"
+    " JSON must include: domain (string), subdomains (list of strings), related_fields (list of"
+    " strings), regulatory_references (list of strings), complexity_drivers (list of values from"
+    " ['terminology_density','regulatory_refs','tables','formulas']), risks (list of objects with"
+    " name, description, mitigation), and recommended_references (optional list of strings).\n"
+    "Metadata and text to analyse (JSON):\n{payload}"
+)
 
 REGULATORY_PATTERNS = [
-    r"Directive\s+\d{4}/\d{1,4}",
-    r"Regulation\s+\(EU\)[^)]+\d{4}",
-    r"Decision\s+\(EU\)[^)]+\d{4}",
-    r"ISO\s?\d{3,5}",
-    r"EN\s?\d{3,5}",
+    re.compile(r"Directive\s+\d{4}/\d{1,4}", re.IGNORECASE),
+    re.compile(r"Regulation\s+\(EU\)[^)]+\d{4}", re.IGNORECASE),
+    re.compile(r"Decision\s+\(EU\)[^)]+\d{4}", re.IGNORECASE),
+    re.compile(r"Article\s+\d+", re.IGNORECASE),
 ]
 
-CHEMICAL_SYMBOLS = {
-    "so2",
-    "nox",
-    "co2",
-    "cao",
-    "mgo",
-    "hcl",
-    "hf",
-    "nh3",
-    "h2o",
-    "o2",
-}
-
-DRIVER_ORDER = ["terminology_density", "regulatory_refs", "tables", "formulas"]
+UPPERCASE_PATTERN = re.compile(r"\b[A-Z]{3,}\b")
+TABLE_PATTERN = re.compile(r"Table\s+\d", re.IGNORECASE)
+FORMULA_PATTERN = re.compile(r"\b[A-Z][a-z]?[0-9]{1,3}[A-Z][a-z]?[0-9]{0,3}\b")
 
 
-def _unique(sequence: Iterable[str]) -> List[str]:
+def _unique(values: Iterable[Any]) -> List[str]:
     seen: set[str] = set()
     ordered: List[str] = []
-    for item in sequence:
-        if not item:
+    for value in values:
+        if not value:
             continue
-        normalised = item.strip()
-        if normalised and normalised not in seen:
-            ordered.append(normalised)
-            seen.add(normalised)
+        normalised = str(value).strip()
+        if not normalised or normalised.lower() in seen:
+            continue
+        seen.add(normalised.lower())
+        ordered.append(normalised)
     return ordered
 
 
-def _analyse_chunk_low_level(text: str) -> Dict[str, Any]:
-    lower_text = text.lower()
+def _keyword_hits(text: str, keywords: Iterable[str]) -> int:
+    lower = text.lower()
+    return sum(lower.count(str(keyword)) for keyword in keywords)
 
-    domains: List[str] = []
-    subdomains: List[str] = []
-    related: List[str] = []
-    for entry in DOMAIN_LIBRARY:
-        if any(keyword in lower_text for keyword in entry["keywords"]):
-            domains.append(entry["domain"])
-            subdomains.append(entry["subdomain"])
-            related.extend(entry["related"])
 
-    bref_hits = sum(1 for keyword in BREF_KEYWORDS if keyword in lower_text)
-    if bref_hits:
-        domains.append("Environmental / Industrial processes")
-        subdomains.append("Cement, Lime and MgO")
-        related.extend(["Industrial emissions", "Environmental compliance"])
+def guess_domain(full_text: str) -> str:
+    if not full_text or not full_text.strip():
+        return GENERAL_DOMAIN
 
+    scores = {
+        domain: _keyword_hits(full_text, keywords)
+        for domain, keywords in DOMAIN_KEYWORDS.items()
+    }
+    best_domain, best_score = max(scores.items(), key=lambda item: item[1])
+    if best_score == 0:
+        return GENERAL_DOMAIN
+    return best_domain
+
+
+def _heuristic_features(text: str) -> Dict[str, Any]:
     regulatory_refs: List[str] = []
     for pattern in REGULATORY_PATTERNS:
-        regulatory_refs.extend(re.findall(pattern, text, flags=re.IGNORECASE))
+        regulatory_refs.extend(pattern.findall(text))
 
-    uppercase_terms = re.findall(r"\b[A-Z]{3,}\b", text)
-    tables_present = bool(re.search(r"Table\s+\d", text, flags=re.IGNORECASE)) or "|" in text or "\t" in text
-    formulas_present = bool(re.search(r"\b[A-Z][a-z]?\d{1,3}[A-Z][a-z]?\d{0,3}\b", text))
-    chemical_hits = {symbol for symbol in CHEMICAL_SYMBOLS if symbol in lower_text}
+    uppercase_terms = UPPERCASE_PATTERN.findall(text)
+    tables_present = bool(TABLE_PATTERN.search(text)) or "|" in text or "\t" in text
+    formulas_present = bool(FORMULA_PATTERN.search(text))
 
     drivers: set[str] = set()
     if len(uppercase_terms) >= 10:
@@ -132,274 +207,311 @@ def _analyse_chunk_low_level(text: str) -> Dict[str, Any]:
         drivers.add("regulatory_refs")
     if tables_present:
         drivers.add("tables")
-    if formulas_present or chemical_hits:
+    if formulas_present:
         drivers.add("formulas")
 
     return {
-        "domains": domains,
-        "subdomains": subdomains,
-        "related": related,
-        "regulatory_refs": _unique(regulatory_refs),
+        "regulatory_references": _unique(regulatory_refs),
         "drivers": drivers,
-        "chemicals": chemical_hits,
-        "bref_hits": bref_hits,
     }
 
 
-def _run_llm_analysis(llm_client, chunk: str) -> Dict[str, Any]:
-    if llm_client is None:
-        return {}
-    prompt = (
-        "You are assisting a localisation project manager. Analyse the provided document chunk and respond "
-        "with JSON containing these keys: domain (string), subdomain (string), related_fields (list of strings), "
-        "regulatory_references (list of strings), complexity_drivers (list of values drawn from ['terminology_density', "
-        "'regulatory_refs', 'tables', 'formulas']), and risks (list of objects with name, description, mitigation).\n"
-        "Chunk: {payload}"
-    )
-    try:
-        result = llm_client.complete_json(prompt, {"chunk": chunk})
-    except Exception:  # pragma: no cover - depends on external service
-        return {}
-    return result or {}
+def _normalise_string_list(values: Any) -> List[str]:
+    if not values:
+        return []
+    if isinstance(values, str):
+        values = [values]
+    if isinstance(values, (list, tuple, set)):
+        return _unique(str(item) for item in values if item)
+    return []
 
 
-def _merge_drivers(*driver_sets: Iterable[str]) -> List[str]:
-    aggregated: List[str] = []
-    for drivers in driver_sets:
-        for driver in drivers or []:
-            if driver in DRIVER_ORDER and driver not in aggregated:
-                aggregated.append(driver)
-    return aggregated
+def _normalise_risks(risks: Any) -> List[Dict[str, str]]:
+    normalised: List[Dict[str, str]] = []
+    if not isinstance(risks, Iterable):
+        return normalised
+    for risk in risks:
+        if not isinstance(risk, dict):
+            continue
+        name = str(risk.get("name", "")).strip()
+        description = str(risk.get("description", "")).strip()
+        mitigation = str(risk.get("mitigation", "")).strip()
+        if name and description and mitigation:
+            normalised.append(
+                {
+                    "name": name,
+                    "description": description,
+                    "mitigation": mitigation,
+                }
+            )
+    return normalised
 
 
-def _determine_complexity(word_estimate: int, drivers: Iterable[str]) -> Dict[str, Any]:
-    driver_list = _merge_drivers(drivers)
-    driver_set = set(driver_list)
+def _merge_unique_risks(*risk_groups: Iterable[Dict[str, str]]) -> List[Dict[str, str]]:
+    seen: set[tuple[str, str, str]] = set()
+    merged: List[Dict[str, str]] = []
+    for group in risk_groups:
+        for risk in group or []:
+            key = (risk.get("name", ""), risk.get("description", ""), risk.get("mitigation", ""))
+            if not all(key):
+                continue
+            if key in seen:
+                continue
+            merged.append({"name": key[0], "description": key[1], "mitigation": key[2]})
+            seen.add(key)
+    return merged
 
+
+def _fallback_chunk_analysis(
+    domain_hint: str,
+    regulatory_refs: Sequence[str],
+    drivers: Iterable[str],
+) -> Dict[str, Any]:
+    metadata = DOMAIN_METADATA.get(domain_hint, DOMAIN_METADATA[GENERAL_DOMAIN])
+    default_risks = RISK_LIBRARY.get(domain_hint, RISK_LIBRARY[GENERAL_DOMAIN])
+    return {
+        "domain": domain_hint,
+        "subdomains": metadata["default_subdomains"],
+        "related_fields": metadata["default_related"],
+        "regulatory_references": _unique(regulatory_refs),
+        "complexity_drivers": _unique(drivers),
+        "risks": [dict(risk) for risk in default_risks],
+        "references": metadata["default_references"],
+    }
+
+
+def _normalise_chunk_result(result: Dict[str, Any], domain_hint: str) -> Dict[str, Any]:
+    domain_value = str(result.get("domain", "")).strip() or domain_hint
+    subdomains = _normalise_string_list(result.get("subdomains"))
+    related = _normalise_string_list(result.get("related_fields"))
+    regulatory_refs = _normalise_string_list(result.get("regulatory_references"))
+    drivers = [driver for driver in _normalise_string_list(result.get("complexity_drivers")) if driver in VALID_COMPLEXITY_DRIVERS]
+    risks = _normalise_risks(result.get("risks"))
+    references = _normalise_string_list(result.get("recommended_references"))
+    return {
+        "domain": domain_value,
+        "subdomains": subdomains,
+        "related_fields": related,
+        "regulatory_references": regulatory_refs,
+        "complexity_drivers": drivers,
+        "risks": risks,
+        "references": references,
+    }
+
+
+def _analyse_chunk_with_llm(
+    llm_client,
+    payload: Dict[str, Any],
+    domain_hint: str,
+    heuristics: Dict[str, Any],
+) -> tuple[Dict[str, Any], bool]:
+    llm_result: Dict[str, Any] | None = None
+    if llm_client is not None:
+        try:
+            llm_result = llm_client.complete_json(PROMPT_TEMPLATE, payload)
+        except Exception as exc:  # pragma: no cover - depends on external service
+            logger.warning("LLM analysis failed; falling back to template: %s", exc)
+            llm_result = None
+    if not isinstance(llm_result, dict) or not llm_result:
+        fallback = _fallback_chunk_analysis(
+            domain_hint,
+            heuristics.get("regulatory_references", []),
+            heuristics.get("drivers", []),
+        )
+        return fallback, True
+    return _normalise_chunk_result(llm_result, domain_hint), False
+
+
+def _most_common_or_default(counter: Counter[str], default: Sequence[str]) -> List[str]:
+    if counter:
+        return _unique(item for item, _ in counter.most_common())
+    return list(default)
+
+
+def _determine_complexity(word_estimate: int, drivers: Sequence[str]) -> Dict[str, Any]:
     level = 1
     if word_estimate > 1500:
         level += 1
     if word_estimate > 4000:
         level += 1
-    level += len(driver_set)
-    level = max(1, min(5, level))
-
-    ordered_drivers = [driver for driver in DRIVER_ORDER if driver in driver_set]
+    if word_estimate > 8000:
+        level += 1
+    level += min(len(list(drivers)), 2)
+    level = max(1, min(level, 5))
+    ordered_drivers = [driver for driver in VALID_COMPLEXITY_DRIVERS if driver in set(drivers)]
     return {"level": level, "drivers": ordered_drivers}
 
 
-def _build_translator_profile(domain: str, drivers: Iterable[str]) -> Dict[str, Any]:
-    domain_lower = (domain or "").lower()
-    drivers_set = set(drivers or [])
-    if "environmental" in domain_lower or "industrial" in domain_lower:
+def _build_translator_profile(domain: str, drivers: Sequence[str]) -> Dict[str, Any]:
+    domain_lower = domain.lower()
+    driver_set = set(drivers)
+    tools = ["memoQ", "Trados Studio", "Xbench", "Verifika"]
+
+    if "medical" in domain_lower or "clinical" in domain_lower:
+        background = "Certified medical translator or healthcare professional with localisation expertise."
+        experience = "Experience handling clinical documentation, discharge summaries, and patient records."
+        tools.append("Multiterm")
+    elif "environmental" in domain_lower or "industrial" in domain_lower:
         background = "Environmental or process engineer with strong localisation background."
-        experience = "Prior work on EU BREF and heavy-industry environmental compliance projects."
+        experience = "Prior work on industrial emissions, environmental compliance, and technical process documentation."
     elif "legal" in domain_lower:
-        background = "Legal translator specialising in EU regulatory frameworks."
-        experience = "Experience translating directives, regulations, and compliance documentation."
+        background = "Legal translator specialising in EU and regulatory materials."
+        experience = "Experience translating directives, regulations, and compliance frameworks."
     else:
-        background = "Technical translator comfortable with complex process documentation."
-        experience = "Experience with manufacturing or engineering materials at EU institutions."
+        background = "Senior technical translator comfortable with complex subject matter."
+        experience = "Demonstrated history working on technical, business, or IT documentation."
 
-    if "terminology_density" in drivers_set:
-        experience += " Able to maintain dense terminology consistency across large projects."
-    if "regulatory_refs" in drivers_set:
-        experience += " Familiarity with legislative citation standards is required."
+    if "terminology_density" in driver_set:
+        experience += " Able to manage dense terminology and maintain glossary alignment."
+    if "regulatory_refs" in driver_set:
+        experience += " Capable of validating legislative and standards references."
 
-    tools = ["memoQ", "Trados", "Xbench", "Verifika"]
     return {
         "required_background": background,
         "preferred_experience": experience,
-        "tools": tools,
+        "tools": _unique(tools),
     }
 
 
-def _build_risks(drivers: Iterable[str], regulatory_refs: Sequence[str]) -> List[Dict[str, str]]:
-    driver_set = set(drivers or [])
-    risks: List[Dict[str, str]] = []
-
-    if "terminology_density" in driver_set:
-        risks.append(
-            {
-                "name": "Terminology consistency",
-                "description": "Dense specialised terminology requires consistent treatment across all files.",
-                "mitigation": "Establish approved glossary entries early and enforce QA with terminology QA tools.",
-            }
-        )
-    if "regulatory_refs" in driver_set or regulatory_refs:
-        risks.append(
-            {
-                "name": "Regulatory references",
-                "description": "EU legislation and standards must remain accurate and up to date.",
-                "mitigation": "Double-check citations against EUR-Lex and client references before delivery.",
-            }
-        )
-    if "tables" in driver_set:
-        risks.append(
-            {
-                "name": "Structured content",
-                "description": "Tables and structured data increase formatting and QA complexity.",
-                "mitigation": "Align with CAT tool table handling and run final layout QA in the delivery format.",
-            }
-        )
-    if "formulas" in driver_set:
-        risks.append(
-            {
-                "name": "Chemical and numeric precision",
-                "description": "Chemical formulas and measurements leave no room for transcription errors.",
-                "mitigation": "Have a subject-matter reviewer verify formulas and numeric units before sign-off.",
-            }
-        )
-
-    if not risks:
-        risks.append(
-            {
-                "name": "General QA",
-                "description": "Large technical projects risk inconsistent tone and formatting across translators.",
-                "mitigation": "Provide unified briefing notes and run bilingual QA before delivery.",
-            }
-        )
-    return risks
-
-
-def _system_notes(domain: str, bref_hits: int, pm_notes: str | None) -> str:
+def _build_system_notes(
+    final_domain: str,
+    heuristic_domain: str,
+    fallback_count: int,
+    chunk_count: int,
+    pm_notes: str | None,
+) -> str:
     notes: List[str] = []
     if pm_notes:
-        notes.append("PM instructions provided; ensure they are reflected in the translator brief and style guide.")
-    if bref_hits >= 2:
+        notes.append("PM instructions supplied; ensure they are reflected in downstream deliverables.")
+    if final_domain:
+        notes.append(f"Domain determined from document content: {final_domain}.")
+    if heuristic_domain and heuristic_domain != final_domain:
         notes.append(
-            "Detected repeated BREF/Cement references. Treat the project as Environmental / Industrial processes → Cement, Lime, MgO."
+            f"Heuristic keyword guess ({heuristic_domain}) differed from the merged analysis; validate with the client."
         )
-    if not domain:
-        notes.append("Domain determined heuristically; validate classification before distribution to linguists.")
+    if fallback_count:
+        notes.append(
+            f"{fallback_count} of {chunk_count} chunk(s) used a fallback template because no LLM response was available."
+        )
+    notes.append("Review the classification before assigning linguists.")
     return "\n".join(notes)
 
 
 def analyze_chunks_hybrid(
-    chunks: List[str],
-    src_lang: str,
-    tgt_langs: List[str],
+    chunks: Sequence[str],
+    src_lang: str | None,
+    tgt_langs: Sequence[str] | None,
     pm_notes: str | None,
     llm_client,
+    *,
+    project_name: str | None = None,
+    full_text: str | None = None,
+    file_count: int | None = None,
 ) -> Dict[str, Any]:
-    """Combine heuristic signals with optional LLM feedback to produce a fixed-schema analysis."""
+    """Analyse document chunks using LLM results with heuristic fallbacks."""
 
-    combined_text = "\n".join(chunks or [])
-    word_estimate = len(re.findall(r"\w+", combined_text))
+    chunks = [chunk for chunk in chunks if chunk]
+    combined_text = full_text if full_text is not None else "\n".join(chunks)
+    domain_guess = guess_domain(combined_text)
 
-    domain_votes: Counter[str] = Counter()
-    subdomain_votes: Counter[str] = Counter()
-    related_fields_counter: Counter[str] = Counter()
-    regulatory_refs_counter: Counter[str] = Counter()
-    driver_counter: Counter[str] = Counter()
-    chemical_mentions: set[str] = set()
-    bref_chunk_hits = 0
-    llm_risks: List[Dict[str, str]] = []
-
+    chunk_results: List[Dict[str, Any]] = []
+    fallback_counter = 0
     for chunk in chunks:
-        low_level = _analyse_chunk_low_level(chunk)
-        for domain in low_level["domains"]:
-            domain_votes[domain] += 1
-        for subdomain in low_level["subdomains"]:
-            subdomain_votes[subdomain] += 1
-        for related in low_level["related"]:
-            related_fields_counter[related] += 1
-        for ref in low_level["regulatory_refs"]:
-            regulatory_refs_counter[ref] += 1
-        for driver in low_level["drivers"]:
-            driver_counter[driver] += 1
-        chemical_mentions.update(low_level["chemicals"])
-        if low_level["bref_hits"]:
-            bref_chunk_hits += 1
+        heuristics = _heuristic_features(chunk)
+        payload = {
+            "chunk": chunk,
+            "domain_hint": domain_guess,
+            "source_language": src_lang or "",
+            "target_languages": list(tgt_langs or []),
+            "pm_notes": pm_notes or "",
+            "regulatory_reference_hints": heuristics.get("regulatory_references", []),
+            "complexity_driver_hints": list(heuristics.get("drivers", [])),
+        }
+        chunk_analysis, used_template = _analyse_chunk_with_llm(llm_client, payload, domain_guess, heuristics)
+        if used_template:
+            fallback_counter += 1
+        chunk_results.append(chunk_analysis)
 
-        llm_result = _run_llm_analysis(llm_client, chunk)
-        if llm_result:
-            domain = llm_result.get("domain")
-            subdomain = llm_result.get("subdomain")
-            if domain:
-                domain_votes[str(domain)] += 1
-            if subdomain:
-                subdomain_votes[str(subdomain)] += 1
-            for related in llm_result.get("related_fields", []) or []:
-                if isinstance(related, str):
-                    related_fields_counter[str(related)] += 1
-            for ref in llm_result.get("regulatory_references", []) or []:
-                if isinstance(ref, str):
-                    regulatory_refs_counter[str(ref)] += 1
-            for driver in llm_result.get("complexity_drivers", []) or []:
-                if isinstance(driver, str):
-                    driver_counter[str(driver)] += 1
-            for risk in llm_result.get("risks", []) or []:
-                if isinstance(risk, dict):
-                    name = str(risk.get("name", ""))
-                    description = str(risk.get("description", ""))
-                    mitigation = str(risk.get("mitigation", ""))
-                    if name and description and mitigation:
-                        llm_risks.append({
-                            "name": name,
-                            "description": description,
-                            "mitigation": mitigation,
-                        })
+    domain_counter: Counter[str] = Counter()
+    subdomain_counter: Counter[str] = Counter()
+    related_counter: Counter[str] = Counter()
+    regulatory_counter: Counter[str] = Counter()
+    driver_counter: Counter[str] = Counter()
+    reference_counter: Counter[str] = Counter()
+    risk_aggregate: List[Dict[str, str]] = []
 
-    if bref_chunk_hits >= 2:
-        domain_value = "Environmental / Industrial processes → Cement, Lime, MgO"
-        subdomains = ["Cement, Lime and MgO"]
-        related_fields_counter.update({"Industrial emissions": 2, "Environmental compliance": 2})
-    else:
-        domain_value = domain_votes.most_common(1)[0][0] if domain_votes else "Technical / Engineering"
-        subdomains = [item for item, _ in subdomain_votes.most_common()]
-        if not subdomains:
-            subdomains = ["Process engineering"] if "technical" in domain_value.lower() else []
+    for result in chunk_results:
+        domain_value = result.get("domain")
+        if domain_value:
+            domain_counter[str(domain_value)] += 1
+        for subdomain in result.get("subdomains", []):
+            subdomain_counter[str(subdomain)] += 1
+        for related in result.get("related_fields", []):
+            related_counter[str(related)] += 1
+        for ref in result.get("regulatory_references", []):
+            regulatory_counter[str(ref)] += 1
+        for driver in result.get("complexity_drivers", []):
+            if driver in VALID_COMPLEXITY_DRIVERS:
+                driver_counter[driver] += 1
+        references = _normalise_string_list(result.get("references", []))
+        reference_counter.update(references)
+        risk_aggregate = _merge_unique_risks(risk_aggregate, result.get("risks", []))
 
-    related_fields = [item for item, _ in related_fields_counter.most_common()]
-    regulatory_refs = [item for item, _ in regulatory_refs_counter.most_common()]
+    final_domain = domain_counter.most_common(1)[0][0] if domain_counter else domain_guess
+    metadata_defaults = DOMAIN_METADATA.get(final_domain, DOMAIN_METADATA[GENERAL_DOMAIN])
 
-    drivers = [driver for driver, count in driver_counter.items() if count > 0]
-    complexity = _determine_complexity(word_estimate, drivers)
+    final_subdomains = _most_common_or_default(subdomain_counter, metadata_defaults["default_subdomains"])
+    final_related = _most_common_or_default(related_counter, metadata_defaults["default_related"])
+    final_reg_refs = _unique([item for item, _ in regulatory_counter.most_common()])
 
-    profile = _build_translator_profile(domain_value, complexity["drivers"])
+    final_drivers = [driver for driver in VALID_COMPLEXITY_DRIVERS if driver_counter[driver] > 0]
+    if not final_drivers:
+        final_drivers = metadata_defaults.get("default_drivers", [])
 
-    combined_risks = _build_risks(complexity["drivers"], regulatory_refs)
-    if llm_risks:
-        combined_risks.extend(llm_risks)
-        combined_risks = [dict(t) for t in {tuple(sorted(risk.items())): risk for risk in combined_risks}.values()]
-
-    references = _unique(
-        [
-            "IATE",
-            "EUR-Lex",
-            "BREF (Cement, Lime and Magnesium Oxide)",
-            *regulatory_refs,
-            *(symbol.upper() for symbol in chemical_mentions),
-        ]
+    final_references = _unique(
+        [item for item, _ in reference_counter.most_common()]
+        + metadata_defaults["default_references"]
+        + final_reg_refs
     )
 
-    pm_section = {
-        "original": pm_notes or "",
-        "system_notes": _system_notes(domain_value, bref_chunk_hits, pm_notes),
-    }
+    if not risk_aggregate:
+        risk_aggregate = [dict(risk) for risk in RISK_LIBRARY.get(final_domain, RISK_LIBRARY[GENERAL_DOMAIN])]
 
+    word_estimate = len(re.findall(r"\w+", combined_text))
+    complexity = _determine_complexity(word_estimate, final_drivers)
+    translator_profile = _build_translator_profile(final_domain, complexity["drivers"])
+
+    chunk_count = len(chunks)
     analysis: Dict[str, Any] = {
         "document_metadata": {
-            "project_name": "",
-            "source_language": (src_lang or "").strip().lower(),
-            "target_languages": _unique((lang or "").strip().lower() for lang in tgt_langs or []),
-            "file_count": len(chunks),
+            "project_name": project_name or "",
+            "source_language": (src_lang or "").strip(),
+            "target_languages": _unique(str(lang).strip() for lang in (tgt_langs or [])),
+            "file_count": file_count if file_count is not None else chunk_count,
             "word_estimate": word_estimate,
         },
         "classification": {
-            "domain": domain_value,
-            "subdomains": _unique(subdomains),
-            "related_fields": _unique(related_fields),
+            "domain": final_domain,
+            "subdomains": final_subdomains,
+            "related_fields": final_related,
         },
         "complexity": complexity,
-        "translator_profile": profile,
-        "risks": combined_risks,
-        "references": references,
-        "pm_notes": pm_section,
+        "translator_profile": translator_profile,
+        "risks": risk_aggregate,
+        "references": final_references,
+        "pm_notes": {
+            "original": pm_notes or "",
+            "system_notes": _build_system_notes(
+                final_domain,
+                domain_guess,
+                fallback_counter,
+                chunk_count,
+                pm_notes,
+            ),
+        },
     }
 
     return analysis
 
 
-__all__ = ["analyze_chunks_hybrid"]
+__all__ = ["analyze_chunks_hybrid", "guess_domain"]

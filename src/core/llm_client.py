@@ -33,6 +33,7 @@ class LLMClient:
         provider: str,
         model: str,
         *,
+        api_key: str | None = None,
         temperature: float = 0.0,
         max_retries: int = 2,
         timeout: float = 60.0,
@@ -42,19 +43,25 @@ class LLMClient:
         self.temperature = temperature
         self.max_retries = max_retries
         self.timeout = timeout
+        self._api_key = api_key
 
-        if self.provider == "openai" and openai is not None:
-            api_key = os.getenv("OPENAI_API_KEY")
-            if api_key:
-                openai.api_key = api_key
-        if self.provider == "anthropic" and anthropic is not None:
-            api_key = os.getenv("ANTHROPIC_API_KEY")
-            if api_key:
-                self._anthropic_client = anthropic.Anthropic(api_key=api_key)
-            else:  # pragma: no cover - configuration issue
-                self._anthropic_client = None
-        else:
+        if self.provider == "openai":
+            if openai is None:
+                raise RuntimeError("openai package not installed")
+            key = api_key or os.getenv("OPENAI_API_KEY")
+            if not key:
+                raise RuntimeError("OpenAI API key not configured")
+            openai.api_key = key
             self._anthropic_client = None
+        elif self.provider == "anthropic":
+            if anthropic is None:
+                raise RuntimeError("anthropic package not installed")
+            key = api_key or os.getenv("ANTHROPIC_API_KEY")
+            if not key:
+                raise RuntimeError("Anthropic API key not configured")
+            self._anthropic_client = anthropic.Anthropic(api_key=key)
+        else:
+            raise ValueError(f"Unsupported LLM provider: {self.provider}")
 
     def complete_json(self, prompt: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         payload_json = (
@@ -67,6 +74,9 @@ class LLMClient:
                 raw_response = self._invoke_model(formatted_prompt)
                 if not raw_response:
                     raise ValueError("Empty response from LLM")
+                if not isinstance(raw_response, str):
+                    raw_response = str(raw_response)
+                raw_response = raw_response.strip()
                 return json.loads(raw_response)
             except json.JSONDecodeError as exc:
                 logger.error("LLM returned invalid JSON (attempt %s/%s): %s", attempt, self.max_retries, exc)
@@ -118,4 +128,72 @@ class LLMClient:
         return content_block.text  # type: ignore[attr-defined]
 
 
-__all__ = ["LLMClient"]
+def _read_streamlit_secrets() -> Dict[str, Any]:
+    try:  # pragma: no cover - Streamlit not always available in tests
+        import streamlit as st  # type: ignore
+
+        secrets = getattr(st, "secrets", {})
+        if not isinstance(secrets, dict):
+            return {}
+        return {key: secrets[key] for key in secrets}
+    except Exception:
+        return {}
+
+
+def _resolve_llm_settings() -> tuple[str | None, str | None, str | None]:
+    secrets = _read_streamlit_secrets()
+    llm_section = secrets.get("llm", {}) if isinstance(secrets.get("llm"), dict) else {}
+
+    provider = (llm_section.get("provider") or secrets.get("llm_provider") or os.getenv("LLM_PROVIDER"))
+    model = llm_section.get("model") or secrets.get("llm_model") or os.getenv("LLM_MODEL")
+
+    provider_lower = (provider or "").lower()
+    api_key = (
+        llm_section.get("api_key")
+        or (
+            llm_section.get("openai_api_key")
+            if provider_lower == "openai"
+            else llm_section.get("anthropic_api_key")
+        )
+    )
+
+    if not api_key and provider_lower == "openai":
+        api_key = secrets.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
+    elif not api_key and provider_lower == "anthropic":
+        api_key = secrets.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY")
+
+    if not api_key:
+        api_key = os.getenv("LLM_API_KEY")
+
+    return provider, model, api_key
+
+
+DEFAULT_MODELS = {
+    "anthropic": "claude-3-haiku-20240307",
+    "openai": "gpt-4o-mini",
+}
+
+
+def load_llm_client() -> LLMClient | None:
+    """Instantiate an :class:`LLMClient` from secrets or environment variables."""
+
+    provider, model, api_key = _resolve_llm_settings()
+    provider = (provider or "anthropic").lower()
+    model = model or DEFAULT_MODELS.get(provider)
+
+    if not api_key:
+        logger.info("No API key configured for %s provider; falling back to template responses.", provider)
+        return None
+
+    if not model:
+        logger.info("No model configured for %s provider; falling back to template responses.", provider)
+        return None
+
+    try:
+        return LLMClient(provider=provider, model=model, api_key=api_key)
+    except Exception as exc:  # pragma: no cover - configuration errors
+        logger.error("Failed to initialise LLM client: %s", exc)
+        return None
+
+
+__all__ = ["LLMClient", "load_llm_client"]
