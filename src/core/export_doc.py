@@ -1,90 +1,92 @@
 from __future__ import annotations
 
+from datetime import datetime
 from io import BytesIO
-from typing import Any, Mapping, Sequence
+from typing import Any, Dict, List
 
 from docx import Document
 
 
-def _add_key_value_paragraph(doc: Document, label: str, value: Any) -> None:
-    paragraph = doc.add_paragraph()
-    paragraph.add_run(f"{label}: ").bold = True
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        paragraph.add_run(", ".join(str(item) for item in value if item))
-    else:
-        paragraph.add_run(str(value) if value is not None else "")
-
-
-def _add_list_section(doc: Document, title: str, items: Sequence[Any]) -> None:
-    doc.add_heading(title, level=2)
-    for item in items or []:
-        if isinstance(item, Mapping):
-            para = doc.add_paragraph(style="List Bullet")
-            content = ", ".join(f"{key}: {value}" for key, value in item.items() if value)
-            para.add_run(content)
-        else:
-            doc.add_paragraph(str(item), style="List Bullet")
-
-
-def analysis_to_docx(analysis: Mapping[str, Any]) -> bytes:
-    """Render the document analysis dictionary into a Word document."""
+def analysis_to_docx(analysis: Dict[str, Any]) -> bytes:
+    """Convert a document analysis dictionary into DOCX bytes."""
 
     doc = Document()
+    meta = analysis.get("document_metadata", {})
+    clsf = analysis.get("classification", {})
+    cx = analysis.get("complexity", {})
+    prof = analysis.get("translator_profile", {})
+    risks: List[Dict[str, Any]] = analysis.get("risks", []) or []
+    refs = analysis.get("references", []) or []
+    pm_notes = analysis.get("pm_notes", {}) or {}
+
     doc.add_heading("Document Analysis Report", level=1)
+    doc.add_paragraph(f"Generated: {datetime.utcnow().isoformat()} UTC")
 
-    metadata = analysis.get("document_metadata", {})
-    doc.add_heading("Document metadata", level=2)
-    _add_key_value_paragraph(doc, "Project name", metadata.get("project_name", ""))
-    _add_key_value_paragraph(doc, "Source language", metadata.get("source_language", ""))
-    _add_key_value_paragraph(doc, "Target languages", metadata.get("target_languages", []))
-    _add_key_value_paragraph(doc, "Files analysed", metadata.get("file_count", 0))
-    _add_key_value_paragraph(doc, "Estimated words", metadata.get("word_estimate", 0))
+    # 1. Metadata
+    doc.add_heading("1. Document Metadata", level=2)
+    doc.add_paragraph(f"Project name: {meta.get('project_name', '')}")
+    doc.add_paragraph(f"Source language: {meta.get('source_language', '')}")
+    doc.add_paragraph(
+        "Target languages: "
+        + ", ".join(meta.get("target_languages", []) or [])
+    )
+    doc.add_paragraph(f"File count: {meta.get('file_count', '')}")
+    doc.add_paragraph(f"Word estimate: {meta.get('word_estimate', '')}")
 
-    classification = analysis.get("classification", {})
-    doc.add_heading("Classification", level=2)
-    _add_key_value_paragraph(doc, "Domain", classification.get("domain", ""))
-    _add_key_value_paragraph(doc, "Subdomains", classification.get("subdomains", []))
-    _add_key_value_paragraph(doc, "Related fields", classification.get("related_fields", []))
+    # 2. Classification
+    doc.add_heading("2. Classification", level=2)
+    doc.add_paragraph(f"Domain: {clsf.get('domain', '')}")
+    doc.add_paragraph(
+        f"Subdomains: {', '.join(clsf.get('subdomains', []) or [])}"
+    )
+    doc.add_paragraph(
+        f"Related fields: {', '.join(clsf.get('related_fields', []) or [])}"
+    )
 
-    complexity = analysis.get("complexity", {})
-    doc.add_heading("Complexity", level=2)
-    _add_key_value_paragraph(doc, "Level", complexity.get("level", ""))
-    _add_key_value_paragraph(doc, "Drivers", complexity.get("drivers", []))
+    # 3. Complexity
+    doc.add_heading("3. Complexity", level=2)
+    doc.add_paragraph(f"Level: {cx.get('level', '')}")
+    doc.add_paragraph("Drivers:")
+    for driver in cx.get("drivers", []) or []:
+        doc.add_paragraph(f"- {driver}", style="List Bullet")
 
-    profile = analysis.get("translator_profile", {})
-    doc.add_heading("Translator profile", level=2)
-    _add_key_value_paragraph(doc, "Required background", profile.get("required_background", ""))
-    _add_key_value_paragraph(doc, "Preferred experience", profile.get("preferred_experience", ""))
-    _add_key_value_paragraph(doc, "Recommended tools", profile.get("tools", []))
+    # 4. Translator profile
+    doc.add_heading("4. Translator Profile", level=2)
+    doc.add_paragraph(
+        f"Required background: {prof.get('required_background', '')}"
+    )
+    doc.add_paragraph(
+        f"Preferred experience: {prof.get('preferred_experience', '')}"
+    )
+    doc.add_paragraph("Recommended tools:")
+    for tool in prof.get("tools", []) or []:
+        doc.add_paragraph(f"- {tool}", style="List Bullet")
 
-    risks = analysis.get("risks", [])
-    doc.add_heading("Risks & mitigations", level=2)
-    for risk in risks or []:
-        if not isinstance(risk, Mapping):
-            doc.add_paragraph(str(risk), style="List Bullet")
-            continue
-        para = doc.add_paragraph(style="List Bullet")
-        name = risk.get("name", "Risk")
-        description = risk.get("description", "")
-        mitigation = risk.get("mitigation", "")
-        para.add_run(f"{name}: ").bold = True
-        para.add_run(description)
-        if mitigation:
-            para.add_run(" — Mitigation: ").bold = True
-            para.add_run(mitigation)
+    # 5. Risks
+    doc.add_heading("5. Risks & Mitigations", level=2)
+    for risk in risks:
+        doc.add_paragraph(
+            f"- {risk.get('name', '')}: {risk.get('description', '')}"
+        )
+        doc.add_paragraph(
+            f"  Mitigation: {risk.get('mitigation', '')}"
+        )
 
-    references = analysis.get("references", [])
-    _add_list_section(doc, "Key references", references)
+    # 6. References
+    doc.add_heading("6. References", level=2)
+    for ref in refs:
+        doc.add_paragraph(f"- {ref}", style="List Bullet")
 
-    pm_notes = analysis.get("pm_notes", {})
-    doc.add_heading("PM notes", level=2)
-    _add_key_value_paragraph(doc, "Original notes", pm_notes.get("original", ""))
-    _add_key_value_paragraph(doc, "System notes", pm_notes.get("system_notes", ""))
+    # 7. PM Notes
+    doc.add_heading("7. PM Notes", level=2)
+    if pm_notes.get("original"):
+        doc.add_paragraph(f"From PM: {pm_notes['original']}")
+    doc.add_paragraph(f"System notes: {pm_notes.get('system_notes', '')}")
 
-    buffer = BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer.read()
+    bio = BytesIO()
+    doc.save(bio)
+    bio.seek(0)
+    return bio.read()
 
 
 __all__ = ["analysis_to_docx"]
