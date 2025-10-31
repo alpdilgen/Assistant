@@ -1,401 +1,237 @@
-"""Style guide assembly informed by PM inputs and automated analysis."""
+"""Build and export project-specific translation style guides."""
 from __future__ import annotations
 
+import io
+import re
 from collections import OrderedDict
-from typing import Any, Dict, Iterable, List, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Sequence
 
-LANGUAGE_CONVENTIONS: dict[str, dict[str, str]] = {
-    "ro": {
-        "dates": "Use DD.MM.YYYY and include Romanian diacritics (ă, â, î, ș, ț) consistently.",
-        "numbers": "Use comma as decimal separator and period as thousands separator. Non-breaking space before currency (e.g. 150 RON).",
-        "address": "Prefer polite plural forms (dumneavoastră) for formal communication.",
-        "quotation": "Use Romanian quotation marks („“), fallback to double quotes when UI constraints apply.",
-    },
-    "de": {
-        "dates": "Use DD.MM.YYYY and keep nouns capitalised.",
-        "numbers": "Comma as decimal separator and period for thousands (1.000,50).",
-        "address": "Use formal Sie unless specified otherwise.",
-        "quotation": "Use „…“ or »…« depending on client preference.",
-    },
-    "fr": {
-        "dates": "Use DD/MM/YYYY and insert non-breaking spaces before ; : ? !",
-        "numbers": "Comma decimal separator, space for thousands (1 000,50).",
-        "address": "Use vouvoiement unless instructed otherwise.",
-        "quotation": "Use guillemets (« … »).",
-    },
-    "es": {
-        "dates": "Use DD/MM/YYYY and spell out months when space allows.",
-        "numbers": "Comma decimal separator and period for thousands.",
-        "address": "Use formal usted for professional communication unless persona demands otherwise.",
-        "quotation": "Use «…» or “…” depending on platform.",
-    },
-    "it": {
-        "dates": "Use DD/MM/YYYY and Italian month names when expanded.",
-        "numbers": "Comma decimal separator, period for thousands.",
-        "address": "Use formal Lei for hospitality and professional contexts.",
-        "quotation": "Use «…» for long text and double quotes in UI.",
-    },
-    "ru": {
-        "dates": "Use DD.MM.YYYY and genitive month names when spelling out.",
-        "numbers": "Comma decimal separator, space for thousands.",
-        "address": "Use formal Вы for B2B communication.",
-        "quotation": "Use «…» with inner „…“.",
-    },
-    "uk": {
-        "dates": "Use DD.MM.YYYY and include apostrophe in year abbreviations.",
-        "numbers": "Comma decimal separator, space for thousands.",
-        "address": "Use formal Ви with capital letter.",
-        "quotation": "Use «…» or “…” depending on medium.",
-    },
-    "tr": {
-        "dates": "Use DD.MM.YYYY and month names in lowercase.",
-        "numbers": "Comma decimal separator, period for thousands.",
-        "address": "Use polite second person plural (Siz) in formal contexts.",
-        "quotation": "Use double quotes for UI and «…» for long form.",
-    },
-    "ar": {
-        "dates": "Use DD/MM/YYYY and Arabic month names when possible.",
-        "numbers": "Use Eastern Arabic numerals when required by client; otherwise Arabic digits with comma decimal separator.",
-        "address": "Maintain formal address and gender agreement.",
-        "quotation": "Use «…» respecting right-to-left layout.",
-    },
-    "zh-cn": {
-        "dates": "Use YYYY年M月D日 format or YYYY-MM-DD in UI.",
-        "numbers": "Use Arabic numerals with comma separators; maintain units after numbers.",
-        "address": "Keep polite tone and use full-width punctuation where appropriate.",
-        "quotation": "Use full-width Chinese quotes （“……”） or 「……」 depending on platform.",
-    },
-    "ja": {
-        "dates": "Use YYYY年M月D日; use era notation if client requests.",
-        "numbers": "Use Arabic numerals with comma separators and include full-width characters in vertical text.",
-        "address": "Use polite language (です・ます調) unless casual tone specified.",
-        "quotation": "Use Japanese corner brackets 「…」 or 『…』.",
-    },
-    "ko": {
-        "dates": "Use YYYY년 M월 D일 or YYYY.MM.DD for UI.",
-        "numbers": "Use comma as thousands separator; place currency before amount (₩50,000).",
-        "address": "Use polite form (~습니다) unless instructed otherwise.",
-        "quotation": "Use Korean quotes 「…」 / 『…』 or double quotes depending on platform.",
-    },
-    "no": {
-        "dates": "Use DD.MM.YYYY and capitalise weekdays.",
-        "numbers": "Use comma as decimal separator and space for thousands.",
-        "address": "Use formal De in official contexts, otherwise du for informal communications.",
-        "quotation": "Use «…» or double quotes depending on medium.",
-    },
-    "sr": {
-        "dates": "Use DD.MM.YYYY and specify Cyrillic/Latin requirements.",
-        "numbers": "Comma decimal separator and period for thousands.",
-        "address": "Clarify script preference; default to formal Ви.",
-        "quotation": "Use „…“ for Cyrillic and “...” for Latin.",
-    },
-    "bs": {
-        "dates": "Use DD.MM.YYYY and specify whether Latin script is required.",
-        "numbers": "Comma decimal separator, period for thousands.",
-        "address": "Use formal Vi in professional contexts.",
-        "quotation": "Use „…“ or “...” depending on platform.",
-    },
-}
+from docx import Document
 
-DEFAULT_LANGUAGE_GUIDANCE = {
-    "dates": "Follow local conventions for dates (prefer numeric format unless client specifies otherwise).",
-    "numbers": "Use locale-appropriate separators and keep measurement units consistent with the source.",
-    "address": "Adopt the standard level of formality for business communication in the target locale.",
-    "quotation": "Use native quotation marks where supported; otherwise fall back to double quotes.",
-}
+if TYPE_CHECKING:  # pragma: no cover - typing helpers for editors
+    from src.core.llm_client import LLMClient
+
+import yaml
+
+CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "settings.yaml"
+try:  # pragma: no cover - configuration loader
+    with CONFIG_PATH.open("r", encoding="utf-8") as handle:
+        SETTINGS = yaml.safe_load(handle)
+except FileNotFoundError:  # pragma: no cover - packaging fallback
+    SETTINGS = {}
+
+STYLEGUIDE_PROMPT = SETTINGS.get("prompts", {}).get(
+    "styleguide_refinement",
+    (
+        "You are a senior localisation PM. Refine the provided style guide JSON, enriching empty fields "
+        "while preserving the structure. Respond with JSON only."
+    ),
+)
+
+SECTION_TITLES = OrderedDict(
+    [
+        ("project_overview", "Project Overview"),
+        ("content_summary", "Content Summary"),
+        ("language_profile", "Language Profile"),
+        ("tone_and_voice", "Tone and Voice"),
+        ("audience", "Audience"),
+        ("terminology", "Terminology"),
+        ("do_not_translate", "Do Not Translate"),
+        ("formatting", "Formatting"),
+        ("ui_copy", "UI Copy"),
+        ("units_and_measurements", "Units & Measurements"),
+        ("quality_checks", "Quality Checks"),
+        ("review_process", "Review Process"),
+    ]
+)
 
 
-def _language_guidance(language_code: str) -> dict[str, str]:
-    return LANGUAGE_CONVENTIONS.get(language_code.lower(), DEFAULT_LANGUAGE_GUIDANCE)
+def _normalise_text(value: str) -> str:
+    return value.strip() if value else ""
 
 
-def _base_template(
+def _normalise_list(items: Iterable[str]) -> List[str]:
+    return sorted({item.strip() for item in items if item and item.strip()})
+
+
+def _extract_brand_terms(texts: Sequence[str]) -> List[str]:
+    """Identify capitalised words that may represent brand names."""
+
+    pattern = re.compile(r"\b[A-Z][A-Z0-9\-]{2,}\b")
+    brands: set[str] = set()
+    for text in texts:
+        if not text:
+            continue
+        for match in pattern.findall(text):
+            brands.add(match)
+    return sorted(brands)
+
+
+def _normalise_terminology(entries: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    normalised: List[Dict[str, Any]] = []
+    for entry in entries or []:
+        term = _normalise_text(str(entry.get("term", "")))
+        translation = _normalise_text(str(entry.get("translation", "")))
+        notes = _normalise_text(str(entry.get("notes", "")))
+        category = _normalise_text(str(entry.get("category", "")))
+        dnt_flag = bool(entry.get("dnt")) or str(entry.get("status", "")).lower() == "dnt"
+        if not term:
+            continue
+        normalised.append(
+            {
+                "term": term,
+                "translation": translation,
+                "notes": notes,
+                "category": category,
+                "dnt": dnt_flag,
+            }
+        )
+    return normalised
+
+
+def _derive_dnt_terms(terminology: Sequence[Mapping[str, Any]], pm_notes: str) -> List[str]:
+    flagged = [entry.get("term", "") for entry in terminology if entry.get("dnt")]
+    brands = _extract_brand_terms([pm_notes])
+    return _normalise_list(list(flagged) + brands)
+
+
+def _build_template(
     project_name: str,
-    src_lang: str,
-    tgt_lang: str,
-    domains: Iterable[str],
-    document_type: Optional[str] = None,
-) -> "OrderedDict[str, Any]":
-    domain_list = [domain for domain in domains if domain]
-    domain_summary = ", ".join(domain_list) if domain_list else "General"
-    template = OrderedDict(
-        {
-            "general_information": {
-                "project_name": project_name or "",
-                "languages": {"source": src_lang, "target": tgt_lang},
-                "domain_focus": domain_summary,
-                "document_type": document_type or "",
-                "notes": (
-                    "Structure mirrors the Translation Style Guide Questionnaire used for hospitality/spa projects. "
-                    "Update each section as client feedback arrives."
-                ),
-            },
-            "references": {
-                "existing_glossaries": "",
-                "reference_materials": "",
-                "style_samples": "",
-            },
-            "tone": {
-                "desired_voice": "",
-                "audience": "",
-                "examples": [],
-            },
-            "terminology": {
-                "sources": [],
-                "preferred_terms": [],
-                "forbidden_terms": [],
-                "notes": "",
-            },
-            "formatting": {
-                "numbers": "",
-                "dates": "",
-                "capitalisation": "Maintain source casing for brand names; otherwise sentence case unless client specifies.",
-                "punctuation": "",
-            },
-            "ui_rules": {
-                "placeholder_handling": "Preserve placeholders and tags exactly as in source (e.g. {TAG}).",
-                "length_constraints": "Keep translations within UI character limits; prefer concise wording.",
-                "button_copy": "Use actionable verbs; capitalisation follows platform norms.",
-            },
-            "do_not_translate": {
-                "list": [],
-                "validation": "Confirm with PM before removing any candidate from the DNT list.",
-            },
-            "units_and_measurements": {
-                "measurement_system": "",
-                "conversion_rules": "Clarify whether metric to imperial conversions are required.",
-                "numeric_checks": "Run QA for numbers and units before delivery.",
-            },
-            "branding": {
-                "key_messages": "",
-                "taglines": [],
-                "third_party_brands": "",
-            },
-            "locale_conventions": {
-                "formality": "",
-                "address_formats": "",
-                "quotation_marks": "",
-                "additional_notes": "",
-            },
-            "review_process": {
-                "review_steps": [
-                    "Linguist self-QA",
-                    "Peer or LQA review focusing on terminology and tone",
-                    "PM sign-off",
-                ],
-                "sign_off": "",
-            },
-            "language_specific": {
-                "orthography": "",
-                "proofing_focus": "",
-                "common_mistakes": [],
-            },
-        }
-    )
+    analysis: Mapping[str, Any],
+    languages: Mapping[str, Sequence[str]],
+    pm_notes: str,
+    terminology: List[Dict[str, Any]],
+    manual_notes: str,
+) -> OrderedDict[str, Any]:
+    domain = analysis.get("domain") or "General"
+    subdomains = analysis.get("subdomains", []) or []
+    related = analysis.get("related", []) or []
+
+    template: OrderedDict[str, Any] = OrderedDict()
+    template["project_overview"] = {
+        "project_name": project_name,
+        "primary_domain": domain,
+        "subdomains": subdomains,
+        "related_fields": related,
+        "pm_notes": pm_notes,
+    }
+    template["content_summary"] = {
+        "summary": analysis.get("summary") or "",  # backwards compatibility if provided
+        "manual_notes": manual_notes,
+    }
+    template["language_profile"] = {
+        "source_languages": list(languages.get("sources", [])),
+        "target_languages": list(languages.get("targets", [])),
+    }
+    template["tone_and_voice"] = {
+        "default_tone": analysis.get("tone", "Professional"),
+        "notes": "Align with brand personality; adjust based on PM notes when present.",
+    }
+    template["audience"] = {
+        "primary_audience": analysis.get("audience", "General"),
+        "difficulty_level": analysis.get("difficulty_level"),
+    }
+    template["terminology"] = {
+        "entries": terminology,
+        "guidance": "Validate extracted terms with the client. Prefer consistent terminology across assets.",
+    }
+    template["do_not_translate"] = {
+        "terms": _derive_dnt_terms(terminology, pm_notes),
+        "instructions": "Preserve brand names, product names, and interface placeholders in source language.",
+    }
+    template["formatting"] = {
+        "numbers_dates": "Follow locale-specific number and date formats. Confirm measurement conversions with PM.",
+        "punctuation": "Respect local punctuation rules and spacing before/after symbols.",
+        "capitalisation": "Retain source casing for trademarks and UI strings unless instructed otherwise.",
+    }
+    template["ui_copy"] = {
+        "length_constraints": "Stay within UI character limits; favour concise actionable phrasing.",
+        "placeholders": "Keep placeholders and tags unchanged. Verify spacing around variables.",
+        "buttons_links": "Use imperative verbs and consistent casing across UI elements.",
+    }
+    template["units_and_measurements"] = {
+        "measurement_system": "Use metric/imperial conversions as required for the target locale.",
+        "validation": "Double-check figures and units during QA; escalate discrepancies to PM.",
+    }
+    template["quality_checks"] = {
+        "pre_delivery": [
+            "Spellcheck and grammar review",
+            "Terminology verification against glossary",
+            "Cross-check numbers, dates, and placeholders",
+        ],
+        "tools": "Use QA automation tools when available (Xbench, Verifika, etc.).",
+    }
+    template["review_process"] = {
+        "workflow": [
+            "Translator self-review",
+            "Peer or LQA review focusing on terminology and tone",
+            "PM sign-off",
+        ],
+        "contacts": "Document PM and reviewer contacts for escalation.",
+    }
     return template
 
 
-def _normalise_list_field(value: str) -> list[str]:
-    if not value:
-        return []
-    separators = [",", "\n", ";"]
-    working = value
-    for separator in separators:
-        working = working.replace(separator, "\n")
-    items = [item.strip() for item in working.splitlines() if item.strip()]
-    return items
-
-
-def _apply_pm_inputs(
-    template: "OrderedDict[str, Any]",
-    pm_inputs: Dict[str, str],
+def build_styleguide(
     *,
-    language_guidance: dict[str, str],
-) -> None:
-    general = template["general_information"]
-    if pm_inputs.get("company_name"):
-        general["project_name"] = pm_inputs["company_name"].strip()
-
-    references = template["references"]
-    if pm_inputs.get("existing_glossaries"):
-        references["existing_glossaries"] = pm_inputs["existing_glossaries"].strip()
-
-    tone_section = template["tone"]
-    if pm_inputs.get("tone_voice"):
-        tone_section["desired_voice"] = pm_inputs["tone_voice"].strip()
-
-    terminology = template["terminology"]
-    if pm_inputs.get("existing_glossaries"):
-        terminology_sources = terminology.get("sources", [])
-        terminology_sources.insert(0, f"Client-provided glossaries: {pm_inputs['existing_glossaries'].strip()}")
-        terminology["sources"] = terminology_sources
-
-    dnt_section = template["do_not_translate"]
-    if pm_inputs.get("dnt_list"):
-        dnt_section["list"] = _normalise_list_field(pm_inputs["dnt_list"])
-
-    formatting = template["formatting"]
-    if pm_inputs.get("number_rules"):
-        rule = pm_inputs["number_rules"].strip()
-        formatting["numbers"] = rule
-        formatting["dates"] = rule or language_guidance.get("dates", "")
-
-    ui_rules = template["ui_rules"]
-    if pm_inputs.get("ui_rules"):
-        ui_rules["platform_specific"] = pm_inputs["ui_rules"].strip()
-
-    review = template["review_process"]
-    if pm_inputs.get("sign_off_person"):
-        review["sign_off"] = pm_inputs["sign_off_person"].strip()
-
-    locale = template["locale_conventions"]
-    locale.setdefault("additional_notes", "")
-    locale.setdefault("formality", "")
-    locale.setdefault("address_formats", "")
-    locale.setdefault("quotation_marks", "")
-    locale["formality"] = language_guidance.get("address", "")
-    locale["quotation_marks"] = language_guidance.get("quotation", "")
-    locale["additional_notes"] = pm_inputs.get("additional_notes", "").strip() if pm_inputs.get("additional_notes") else locale["additional_notes"]
-
-
-def _auto_populate(
-    template: "OrderedDict[str, Any]",
-    analysis: dict,
-    terms: Optional[List[dict]],
-    language_guidance: dict[str, str],
+    analysis: Mapping[str, Any],
+    pm_notes: str,
+    terminology: Sequence[Mapping[str, Any]],
+    langs: Mapping[str, Sequence[str]],
+    llm_client: "LLMClient" | None,
     project_name: str,
-) -> None:
-    general = template["general_information"]
-    summary = analysis.get("summary") or analysis.get("combined_summary") or ""
-    if project_name and not general.get("project_name"):
-        general["project_name"] = project_name
-    general["project_overview"] = summary
+    manual_notes: str = "",
+) -> OrderedDict[str, Any]:
+    """Combine analysis, notes, and terminology into a structured style guide."""
 
-    audience = analysis.get("audience", "general")
-    tone = analysis.get("tone", "neutral")
-    domains = analysis.get("domains") or [analysis.get("domain")]
+    normalised_terminology = _normalise_terminology(terminology)
+    template = _build_template(project_name, analysis, langs, pm_notes, normalised_terminology, manual_notes)
 
-    references = template["references"]
-    references["reference_materials"] = (
-        "Leverage any hospitality/spa collateral that reflects the detected domains: "
-        f"{', '.join(domains or ['General'])}."
-    )
-    references["style_samples"] = "Use previous launch material or marketing collateral as tone benchmarks when available."
-
-    tone_section = template["tone"]
-    tone_section["desired_voice"] = f"{tone.title()} tone anchored in {', '.join(domains or ['general'])}."
-    tone_section["audience"] = f"Primary audience: {audience}."
-    tone_section["examples"] = [
-        "Keep messaging warm and service-oriented, mirroring the hospitality/spa sample questionnaire.",
-        "Highlight benefits and wellbeing outcomes for guests.",
-    ]
-
-    terminology = template["terminology"]
-    terminology_sources = [
-        "Use external Termextractor output for baseline terminology.",
-        "Incorporate existing hospitality/spa glossaries when provided by PM.",
-    ]
-    terminology["sources"] = terminology_sources
-    preferred_terms = []
-    if terms:
-        for entry in terms:
-            if isinstance(entry, dict) and entry.get("term"):
-                preferred_terms.append(
-                    {
-                        "term": entry.get("term"),
-                        "preferred_translation": entry.get("translation"),
-                        "notes": entry.get("note"),
-                    }
-                )
-    terminology["preferred_terms"] = preferred_terms
-    terminology["notes"] = "If terminology extraction is pending, schedule a follow-up with the PM once the Termextractor export is ready."
-
-    formatting = template["formatting"]
-    formatting["numbers"] = language_guidance.get("numbers", DEFAULT_LANGUAGE_GUIDANCE["numbers"])
-    formatting["dates"] = language_guidance.get("dates", DEFAULT_LANGUAGE_GUIDANCE["dates"])
-    formatting["punctuation"] = language_guidance.get("quotation", DEFAULT_LANGUAGE_GUIDANCE["quotation"])
-
-    ui_rules = template["ui_rules"]
-    ui_rules.setdefault("platform_specific", "")
-    ui_rules["platform_specific"] = "Replicate the sample questionnaire order: navigation labels, booking flow, amenity descriptions."
-
-    dnt_section = template["do_not_translate"]
-    named_entities = []
-    signals = analysis.get("complexity_signals", {})
-    if signals:
-        named_entities = signals.get("named_entities", [])
-    dnt_section["list"] = named_entities
-    if not named_entities:
-        dnt_section["list"] = ["Client brand names", "Spa package names", "Room categories"]
-
-    units = template["units_and_measurements"]
-    numeric_density = signals.get("numeric_density") if signals else None
-    units["measurement_system"] = "Use metric units unless client specifies imperial." if (numeric_density is None or numeric_density >= 0) else units["measurement_system"]
-    units["conversion_rules"] = "Mirror the sample questionnaire: keep temperatures in °C and treatment durations in minutes."
-
-    branding = template["branding"]
-    branding["key_messages"] = "Focus on relaxation, premium guest experience, and wellbeing outcomes."
-    branding["taglines"] = ["Rejuvenate with us", "Wellness tailored to every guest"]
-    branding["third_party_brands"] = "Retain partner spa product names in source language unless instructed otherwise."
-
-    locale = template["locale_conventions"]
-    locale["formality"] = language_guidance.get("address", DEFAULT_LANGUAGE_GUIDANCE["address"])
-    locale["address_formats"] = "Follow national postal standards when addresses appear in content."
-    locale["quotation_marks"] = language_guidance.get("quotation", DEFAULT_LANGUAGE_GUIDANCE["quotation"])
-    locale["additional_notes"] = "Use locale-specific diacritics and ensure currency placement reflects local conventions."
-
-    review = template["review_process"]
-    review["sign_off"] = "PM or client brand manager"
-
-    language_specific = template["language_specific"]
-    language_specific["orthography"] = language_guidance.get("address", DEFAULT_LANGUAGE_GUIDANCE["address"])
-    language_specific["proofing_focus"] = "Ensure spa terminology and wellness-specific benefits remain consistent across documents."
-    language_specific["common_mistakes"] = [
-        "Dropping diacritics in the target language",
-        "Literal translation of wellness package names",
-        "Overly casual tone for premium hospitality brand",
-    ]
+    if llm_client:
+        try:
+            prompt = STYLEGUIDE_PROMPT if "{payload}" in STYLEGUIDE_PROMPT else f"{STYLEGUIDE_PROMPT}\n{{payload}}"
+            enriched = llm_client.complete_json(prompt, {"styleguide": template})
+            if isinstance(enriched, dict):
+                for key, value in enriched.items():
+                    template[key] = value
+        except Exception:  # pragma: no cover - graceful degradation when LLM unavailable
+            pass
+    return template
 
 
-def build_style_guide(
-    analysis: dict,
-    src_lang: str,
-    tgt_lang: str,
-    *,
-    terms: Optional[List[dict]] = None,
-    pm_inputs: Optional[Dict[str, str]] = None,
-    project_name: str | None = None,
-    llm_client=None,
-    prompt: str | None = None,
-) -> Dict[str, Any]:
-    """Build a style guide following the hospitality questionnaire structure."""
+def export_styleguide_docx(data: Mapping[str, Any], filename: str) -> bytes:
+    """Export the style guide data as a DOCX document and return bytes."""
 
-    domains = analysis.get("domains") or [analysis.get("domain")]
-    document_type = analysis.get("document_type")
-    template = _base_template(project_name or "", src_lang, tgt_lang, domains, document_type=document_type)
-    language_guidance = _language_guidance(tgt_lang)
+    document = Document()
+    document.add_heading(f"{filename} Translation Style Guide", level=0)
+    for section_key, section_title in SECTION_TITLES.items():
+        document.add_heading(section_title, level=1)
+        section_value = data.get(section_key, {})
+        if isinstance(section_value, Mapping):
+            for field, value in section_value.items():
+                if isinstance(value, list):
+                    document.add_paragraph(field.replace("_", " ").title() + ":")
+                    for item in value:
+                        document.add_paragraph(str(item), style="List Bullet")
+                elif isinstance(value, Mapping):
+                    document.add_paragraph(field.replace("_", " ").title() + ":")
+                    for sub_field, sub_value in value.items():
+                        document.add_paragraph(f"{sub_field.title()}: {sub_value}")
+                else:
+                    text = str(value).strip()
+                    if text:
+                        document.add_paragraph(f"{field.replace('_', ' ').title()}: {text}")
+        elif isinstance(section_value, list):
+            for item in section_value:
+                document.add_paragraph(str(item), style="List Bullet")
+        elif section_value:
+            document.add_paragraph(str(section_value))
 
-    if pm_inputs:
-        _auto_populate(template, analysis, terms, language_guidance, project_name or "")
-        _apply_pm_inputs(template, pm_inputs, language_guidance=language_guidance)
-    else:
-        _auto_populate(template, analysis, terms, language_guidance, project_name or "")
-
-    style_guide: Dict[str, Any] = dict(template)
-
-    if llm_client and prompt:
-        enriched = llm_client.complete_json(
-            prompt,
-            {
-                "analysis": analysis,
-                "style_guide": style_guide,
-                "pm_inputs": pm_inputs or {},
-            },
-        )
-        if isinstance(enriched, dict):
-            style_guide = enriched
-
-    return style_guide
+    buffer = io.BytesIO()
+    document.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
-__all__ = ["build_style_guide"]
+__all__ = ["build_styleguide", "export_styleguide_docx"]

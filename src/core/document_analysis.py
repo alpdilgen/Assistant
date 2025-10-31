@@ -4,8 +4,29 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from pathlib import Path
 from statistics import mean
-from typing import Iterable, Optional
+from typing import Iterable, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - imported for typing only
+    from src.core.llm_client import LLMClient
+
+import yaml
+
+CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "settings.yaml"
+try:  # pragma: no cover - configuration loader
+    with CONFIG_PATH.open("r", encoding="utf-8") as handle:
+        SETTINGS = yaml.safe_load(handle)
+except FileNotFoundError:  # pragma: no cover - fallback for packaging
+    SETTINGS = {}
+
+DOMAIN_PROMPT = SETTINGS.get("prompts", {}).get(
+    "domain_classification",
+    (
+        "Analyze the following text and determine main domain, subdomain, and related technical fields. "
+        "Respond with JSON using keys 'domain', 'subdomains', and 'related'. Text:\n{payload}"
+    ),
+)
 
 SENTENCE_PATTERN = re.compile(r"(?<=[.!?])\s+")
 WORD_PATTERN = re.compile(r"[\w'-]+", re.UNICODE)
@@ -188,4 +209,61 @@ def _heuristic_summary(text: str) -> str:
     return summary[:700]
 
 
-__all__ = ["analyze_document"]
+def _heuristic_classification(text: str) -> dict:
+    tokens = [token.lower() for token in tokenize(text)]
+    token_counts = Counter(tokens)
+    domain = _detect_domain(token_counts)
+    subdomains = _detect_subdomains(domain, token_counts)
+    related = [item for item, _ in Counter(tokens).most_common(10) if len(item) > 5][:5]
+    return {"domain": domain, "subdomains": subdomains, "related": related}
+
+
+def classify_domain(chunks: Iterable[str], client: "LLMClient" | None) -> dict[str, list[str] | str]:
+    """Classify domain, subdomains, and related fields from text chunks."""
+
+    prompt = DOMAIN_PROMPT
+    results: list[dict] = []
+    for chunk in chunks:
+        chunk_text = (chunk or "").strip()
+        if not chunk_text:
+            continue
+        if client:
+            try:
+                response = client.complete_json(prompt, {"text": chunk_text})
+            except Exception:  # pragma: no cover - fallback to heuristic
+                response = _heuristic_classification(chunk_text)
+        else:
+            response = _heuristic_classification(chunk_text)
+        if isinstance(response, dict):
+            results.append(response)
+
+    if not results:
+        return {"domain": "General", "subdomains": [], "related": []}
+
+    domain_counts: Counter[str] = Counter()
+    subdomain_counts: Counter[str] = Counter()
+    related_counts: Counter[str] = Counter()
+
+    for result in results:
+        domain = result.get("domain")
+        if isinstance(domain, str):
+            domain_counts[domain] += 1
+        for subdomain in result.get("subdomains", []) or []:
+            if isinstance(subdomain, str):
+                subdomain_counts[subdomain] += 1
+        for related in result.get("related", []) or []:
+            if isinstance(related, str):
+                related_counts[related] += 1
+
+    primary_domain = domain_counts.most_common(1)[0][0] if domain_counts else "General"
+    ranked_subdomains = [item for item, _ in subdomain_counts.most_common(5)]
+    ranked_related = [item for item, _ in related_counts.most_common(5)]
+
+    return {
+        "domain": primary_domain,
+        "subdomains": ranked_subdomains,
+        "related": ranked_related,
+    }
+
+
+__all__ = ["analyze_document", "classify_domain"]
