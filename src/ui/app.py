@@ -59,6 +59,42 @@ LANGUAGE_LABELS: Dict[str, str] = {
     "bs": "Bosnian",
 }
 
+ALL_LANGS: List[str] = [
+    "en",
+    "sk",
+    "de",
+    "fr",
+    "it",
+    "es",
+    "pt",
+    "nl",
+    "pl",
+    "ro",
+    "bg",
+    "cs",
+    "da",
+    "et",
+    "fi",
+    "el",
+    "hu",
+    "hr",
+    "lt",
+    "lv",
+    "mt",
+    "sl",
+    "sv",
+    "tr",
+    "ru",
+    "uk",
+    "ar",
+    "zh-CN",
+    "ja",
+    "ko",
+    "no",
+    "sr",
+    "bs",
+]
+
 
 @st.cache_resource
 def load_settings() -> Dict[str, Any]:
@@ -134,11 +170,18 @@ def _files_from_session(stored_files: Iterable[dict]) -> List[io.BytesIO]:
     return buffers
 
 
-def _format_language(code: str) -> str:
-    """Return a human-friendly label for a language code."""
+def _format_language(code: str | None) -> str:
+    """Format a language code for display in selectboxes safely handling nullish values."""
 
-    label = LANGUAGE_LABELS.get(code, code.upper())
-    return f"{label} ({code})"
+    if not code:
+        return "— select language —"
+    code = code.strip()
+    if not code:
+        return "— select language —"
+    code_lower = code.lower()
+    if code_lower in LANGUAGE_LABELS:
+        return LANGUAGE_LABELS[code_lower]
+    return code.upper()
 
 
 def _refresh_language_detection(files: List[io.BytesIO]) -> None:
@@ -153,7 +196,7 @@ def _refresh_language_detection(files: List[io.BytesIO]) -> None:
         detections[file.name] = {
             "detected_source": detected_src,
             "detected_target": detected_tgt,
-            "source": detected_src or "en",
+            "source": detected_src or "",
             "targets": [target for target in targets if target],
             "is_bilingual": bool(detected_tgt),
         }
@@ -223,43 +266,84 @@ def main() -> None:
             _refresh_language_detection(file_buffers)
             language_map = st.session_state.get("file_languages", {})
 
-        available_languages = settings.get("languages", {}).get("default_set", list(LANGUAGE_LABELS.keys()))
+        available_languages = settings.get("languages", {}).get("default_set") or ALL_LANGS
+        available_languages = [
+            lang
+            for lang in available_languages
+            if isinstance(lang, str) and lang.strip()
+        ]
         for file_name, info in language_map.items():
             with st.expander(file_name, expanded=True):
                 detected_src = info.get("detected_source")
                 detected_tgt = info.get("detected_target")
-                if info.get("is_bilingual") and detected_src and detected_tgt:
-                    st.markdown(
-                        f"Detected: **{detected_src.upper()} → {detected_tgt.upper()}**. Confirm or change below."
-                    )
+                is_bilingual = bool(info.get("is_bilingual"))
+                if is_bilingual:
+                    if detected_src and detected_tgt:
+                        st.markdown(
+                            f"Detected: **{detected_src.upper()} → {detected_tgt.upper()}**. Confirm or change below."
+                        )
+                    else:
+                        st.info("At least one language could not be detected from file. Please select below.")
                 elif detected_src:
                     st.markdown(
                         f"Detected: **{detected_src.upper()}**. Confirm the source language and choose target(s)."
                     )
-                else:
-                    st.warning("Unable to detect language automatically. Please select manually.")
 
-                src_default = info.get("source", detected_src or available_languages[0])
-                info["source"] = st.selectbox(
+                if not detected_src:
+                    st.warning(
+                        f"Unable to detect language automatically for {file_name}. Please select manually."
+                    )
+
+                selectable_sources: List[str] = []
+                for candidate in (detected_src, info.get("source")):
+                    if candidate and candidate not in selectable_sources:
+                        selectable_sources.append(candidate)
+                for lang in available_languages:
+                    if lang not in selectable_sources:
+                        selectable_sources.append(lang)
+                selectable_sources = [""] + selectable_sources
+
+                current_source = info.get("source") or detected_src or ""
+                source_index = (
+                    selectable_sources.index(current_source)
+                    if current_source in selectable_sources
+                    else 0
+                )
+                selected_source = st.selectbox(
                     "Source language",
-                    options=available_languages,
-                    index=max(available_languages.index(src_default) if src_default in available_languages else 0, 0),
+                    options=selectable_sources,
+                    index=source_index,
                     format_func=_format_language,
                     key=f"{file_name}_source",
                 )
-                if info.get("is_bilingual"):
-                    tgt_default = info.get("targets", [detected_tgt] if detected_tgt else [])
-                    current = tgt_default[0] if tgt_default else available_languages[0]
+                info["source"] = selected_source.strip() if selected_source else ""
+
+                if is_bilingual:
+                    tgt_candidates: List[str] = []
+                    existing_targets = [target for target in info.get("targets", []) if target]
+                    current_target = existing_targets[0] if existing_targets else (detected_tgt or "")
+                    for candidate in (detected_tgt, current_target):
+                        if candidate and candidate not in tgt_candidates:
+                            tgt_candidates.append(candidate)
+                    for lang in available_languages:
+                        if lang not in tgt_candidates:
+                            tgt_candidates.append(lang)
+                    tgt_options = [""] + tgt_candidates
+                    target_index = (
+                        tgt_options.index(current_target)
+                        if current_target in tgt_options
+                        else 0
+                    )
                     chosen = st.selectbox(
                         "Target language",
-                        options=available_languages,
-                        index=max(available_languages.index(current) if current in available_languages else 0, 0),
+                        options=tgt_options,
+                        index=target_index,
                         format_func=_format_language,
                         key=f"{file_name}_target",
                     )
-                    info["targets"] = [chosen]
+                    info["targets"] = [chosen.strip()] if chosen else []
                 else:
-                    existing = info.get("targets", [])
+                    existing = [code for code in info.get("targets", []) if code]
                     info["targets"] = st.multiselect(
                         "Target languages",
                         options=available_languages,
@@ -318,6 +402,10 @@ def main() -> None:
         st.info("Upload files, confirm languages, and provide a project name to analyse documents.")
     else:
         if st.button("Analyse uploaded documents", key="analyse_documents"):
+            for info in st.session_state.get("file_languages", {}).values():
+                if not info.get("source"):
+                    st.error("Please select a source language to continue.")
+                    st.stop()
             chunks = extract_text_chunks(
                 _files_from_session(stored_files),
                 max_chars=int(chunking_cfg.get("max_chars", 4000)),
