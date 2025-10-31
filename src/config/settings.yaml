@@ -5,38 +5,57 @@ llm:
   temperature: 0.0
   max_retries: 2
   timeout: 60
+
+chunking:
+  max_chars: 4000
+  overlap: 400
+
 languages:
-  - code: en
-    label: English (EN)
-  - code: de
-    label: German (DE)
-  - code: fr
-    label: French (FR)
-document_types:
-  - General
-  - Legal
-  - Technical
-  - Marketing
+  default_set:
+    - bg
+    - hr
+    - cs
+    - da
+    - nl
+    - en
+    - et
+    - fi
+    - fr
+    - de
+    - el
+    - hu
+    - ga
+    - it
+    - lv
+    - lt
+    - mt
+    - pl
+    - pt
+    - ro
+    - sk
+    - sl
+    - es
+    - sv
+    - tr
+    - ru
+    - uk
+    - ar
+    - zh-CN
+    - ja
+    - ko
+    - no
+    - sr
+    - bs
+
 prompts:
-  analysis: |
-    You are a senior linguist assisting a language service provider. Analyse the source material described in the payload below.
-    Respond with a strict JSON object containing the keys: summary, domain, subdomains, difficulty_level, tone, audience, complexity_signals.
-    Use the payload to infer reasonable values and avoid additional commentary.
-    Payload:
+  domain_classification: |
+    You are an experienced localisation strategist. Review the text below and respond with JSON containing
+    "domain" (string), "subdomains" (array), and "related" (array) capturing the technical or subject-matter
+    focus of the material. Text:
     {payload}
-  style_guide: |
-    You are designing a translation style guide. Enrich or adjust the provided baseline style guide in the payload.
-    Respond ONLY with JSON containing the same keys as the input style_guide.
-    Payload:
-    {payload}
-  persona: |
-    You are configuring an LLM translator persona for a professional linguist.
-    Update the persona JSON based on the analysis and style guide in the payload.
-    Respond strictly with JSON.
-    Payload:
-    {payload}
-  pm_brief: |
-    You are an experienced localisation project manager. Refine the project brief using the payload.
-    Respond strictly with JSON and keep existing keys.
-    Payload:
-    {payload}
+  styleguide_refinement: |
+    You are a senior localisation PM. Refine the provided style guide JSON, enriching empty fields while
+    preserving the structure. Respond with JSON only.
+
+external_tools:
+  terminology_url: "https://termtool.streamlit.app"

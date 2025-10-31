@@ -1,28 +1,28 @@
-import os, sys
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
-
-from collections import Counter
+import os
+import sys
+import io
 from pathlib import Path
-from statistics import mean
-from typing import Any, Dict, List, Sequence
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List
 
 import streamlit as st
 import yaml
 
-from src.core.document_ingestion import DocumentPayload, load_documents
-from src.core.document_analysis import analyze_document
-from src.core.styleguide_builder import build_style_guide
-from src.core.persona_builder import build_persona
-from src.core.pm_brief import build_pm_brief
-from src.core.terminology_client import send_to_external_termextractor
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from src.core.document_ingestion import detect_langs_from_file, extract_text_chunks
+from src.core.document_analysis import classify_domain
+from src.core.styleguide_builder import build_styleguide, export_styleguide_docx
+from src.core.terminology_client import parse_terminology_file, send_to_external_termextractor
 from src.core.llm_client import LLMClient
-from src.ui import components
+
+if TYPE_CHECKING:  # pragma: no cover - import only for typing
+    from streamlit.runtime.uploaded_file_manager import UploadedFile
 
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "settings.yaml"
 
-LANGUAGE_OPTIONS: Dict[str, str] = {
+LANGUAGE_LABELS: Dict[str, str] = {
     "bg": "Bulgarian",
     "hr": "Croatian",
     "cs": "Czech",
@@ -62,13 +62,17 @@ LANGUAGE_OPTIONS: Dict[str, str] = {
 
 @st.cache_resource
 def load_settings() -> Dict[str, Any]:
+    """Load YAML configuration shared across UI and core modules."""
+
     with CONFIG_PATH.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle)
 
 
-def _build_llm_client(settings: Dict[str, Any], enabled: bool) -> LLMClient | None:
+def _build_llm_client(settings: Dict[str, Any]) -> LLMClient | None:
+    """Instantiate the shared LLM client if configuration enables it."""
+
     llm_settings = settings.get("llm", {})
-    if not enabled or not llm_settings.get("enabled"):
+    if not llm_settings.get("enabled"):
         return None
     try:
         return LLMClient(
@@ -78,386 +82,409 @@ def _build_llm_client(settings: Dict[str, Any], enabled: bool) -> LLMClient | No
             max_retries=int(llm_settings.get("max_retries", 2)),
             timeout=float(llm_settings.get("timeout", 60)),
         )
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - UI feedback only
         st.sidebar.error(f"Failed to initialise LLM client: {exc}")
         return None
 
 
-def _language_selector(label: str, session_key: str, default: str) -> str:
-    options = list(LANGUAGE_OPTIONS.keys())
-    if session_key not in st.session_state or st.session_state[session_key] not in options:
-        st.session_state[session_key] = default
-    default_index = options.index(st.session_state[session_key])
-    selection = st.selectbox(
-        label,
-        options=options,
-        index=default_index,
-        format_func=lambda code: f"{LANGUAGE_OPTIONS[code]} ({code})",
-        key=f"{session_key}_selector",
-    )
-    st.session_state[session_key] = selection
-    return selection
+def _ensure_session_defaults() -> None:
+    """Initialise Streamlit session state keys used throughout the workflow."""
 
-
-def _average(values: Sequence[float]) -> float:
-    filtered = [value for value in values if value is not None]
-    return float(mean(filtered)) if filtered else 0.0
-
-
-def _combine_document_analyses(analyses: List[dict]) -> dict:
-    if not analyses:
-        return {}
-
-    domains = [analysis.get("domain") for analysis in analyses if analysis.get("domain")]
-    domain_counter = Counter(domains)
-    unique_domains = sorted(set(domains))
-    primary_domain = domain_counter.most_common(1)[0][0] if domain_counter else "General"
-
-    subdomains = sorted({sub for analysis in analyses for sub in analysis.get("subdomains", []) if sub})
-    tone_counter = Counter(analysis.get("tone") for analysis in analyses if analysis.get("tone"))
-    tone = tone_counter.most_common(1)[0][0] if tone_counter else "neutral"
-    audience_counter = Counter(analysis.get("audience") for analysis in analyses if analysis.get("audience"))
-    audience = audience_counter.most_common(1)[0][0] if audience_counter else "general"
-    difficulty = max((analysis.get("difficulty_level", 0) for analysis in analyses), default=0)
-
-    signals_list = [analysis.get("complexity_signals", {}) for analysis in analyses]
-    aggregated_signals = {
-        "avg_sentence_len": round(_average([signals.get("avg_sentence_len") for signals in signals_list]), 2),
-        "technical_term_density": round(_average([signals.get("technical_term_density") for signals in signals_list]), 4),
-        "abbreviation_density": round(_average([signals.get("abbreviation_density") for signals in signals_list]), 4),
-        "numeric_density": round(_average([signals.get("numeric_density") for signals in signals_list]), 4),
-        "named_entities": sorted({entity for signals in signals_list for entity in signals.get("named_entities", [])}),
-        "terminology_count": int(sum(signals.get("terminology_count", 0) for signals in signals_list)),
+    defaults = {
+        "stored_files": [],
+        "file_languages": {},
+        "languages_confirmed": False,
+        "project_name": "",
+        "pm_notes": "",
+        "pm_notes_enabled": False,
+        "analysis_chunks": [],
+        "analysis_result": None,
+        "analysis_confirmed": False,
+        "terminology_entries": [],
+        "terminology_required": False,
+        "styleguide_data": None,
+        "styleguide_docx": None,
+        "styleguide_mode": "ai",
+        "editing_analysis": False,
     }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
 
-    document_summaries = [
-        {
-            "filename": analysis.get("filename"),
-            "summary": analysis.get("summary"),
-            "difficulty_level": analysis.get("difficulty_level"),
-            "tone": analysis.get("tone"),
+
+def _persist_uploaded_files(uploads: Iterable["UploadedFile"]) -> List[dict]:
+    """Convert Streamlit UploadedFile objects into session-friendly payloads."""
+
+    stored: List[dict] = []
+    for uploaded in uploads:
+        if uploaded is None:
+            continue
+        data = uploaded.getvalue()
+        stored.append({"name": uploaded.name, "data": data, "type": uploaded.type})
+    return stored
+
+
+def _files_from_session(stored_files: Iterable[dict]) -> List[io.BytesIO]:
+    """Re-create file-like buffers from bytes stored in the session."""
+
+    buffers: List[io.BytesIO] = []
+    for file_info in stored_files:
+        buffer = io.BytesIO(file_info.get("data", b""))
+        buffer.name = file_info.get("name", "uploaded_file")
+        buffers.append(buffer)
+    return buffers
+
+
+def _format_language(code: str) -> str:
+    """Return a human-friendly label for a language code."""
+
+    label = LANGUAGE_LABELS.get(code, code.upper())
+    return f"{label} ({code})"
+
+
+def _refresh_language_detection(files: List[io.BytesIO]) -> None:
+    """Detect languages for each uploaded file and store them in session state."""
+
+    detections: Dict[str, dict] = {}
+    for file in files:
+        file.seek(0)
+        detected_src, detected_tgt = detect_langs_from_file(file)
+        file.seek(0)
+        targets = [detected_tgt] if detected_tgt else []
+        detections[file.name] = {
+            "detected_source": detected_src,
+            "detected_target": detected_tgt,
+            "source": detected_src or "en",
+            "targets": [target for target in targets if target],
+            "is_bilingual": bool(detected_tgt),
         }
-        for analysis in analyses
-    ]
-    combined_summary = "\n\n".join(
-        f"{item['filename']}: {item['summary']}".strip()
-        for item in document_summaries
-        if item.get("summary")
-    ).strip()
-
-    return {
-        "summary": combined_summary,
-        "combined_summary": combined_summary,
-        "domain": primary_domain,
-        "domains": unique_domains or [primary_domain],
-        "subdomains": subdomains,
-        "tone": tone,
-        "audience": audience,
-        "difficulty_level": difficulty,
-        "complexity_signals": aggregated_signals,
-        "document_breakdown": document_summaries,
-        "documents": analyses,
-        "total_documents": len(analyses),
-    }
+    st.session_state["file_languages"] = detections
+    st.session_state["languages_confirmed"] = False
 
 
-def _build_document_analyses(
-    payloads: Sequence[DocumentPayload],
-    *,
-    src_lang: str,
-    tgt_lang: str,
-    llm_client: LLMClient | None,
-    prompts: Dict[str, Any],
-) -> List[dict]:
-    analysis_prompt = prompts.get("analysis") if llm_client else None
-    analyses: List[dict] = []
-    for payload in payloads:
-        document_analysis = analyze_document(
-            payload.raw_text,
-            terms=[],
-            use_llm_summary=bool(llm_client and analysis_prompt),
-            llm_client=llm_client,
-            prompt=analysis_prompt,
-        )
-        document_analysis["filename"] = payload.filename
-        document_analysis["source_language"] = payload.source_language or src_lang
-        document_analysis["target_language"] = payload.target_language or tgt_lang
-        analyses.append(document_analysis)
-    return analyses
+def _languages_ready(language_map: Dict[str, dict]) -> bool:
+    """Determine whether the language confirmation step can be considered complete."""
+
+    if not language_map:
+        return False
+    for entry in language_map.values():
+        if not entry.get("source"):
+            return False
+        targets = entry.get("targets", [])
+        if entry.get("is_bilingual") and len(targets) != 1:
+            return False
+        if not entry.get("is_bilingual") and not targets:
+            return False
+    return True
+
+
+def _update_progress_sidebar(step_status: Dict[str, bool]) -> None:
+    """Render a progress indicator and read-only checklist in the sidebar."""
+
+    total_steps = len(step_status)
+    completed_steps = sum(1 for done in step_status.values() if done)
+    progress_value = completed_steps / total_steps if total_steps else 0.0
+    st.sidebar.progress(progress_value)
+    for name, done in step_status.items():
+        st.sidebar.checkbox(name, value=done, disabled=True)
 
 
 def main() -> None:
-    st.set_page_config(page_title="LSP Assistant", layout="wide")
+    """Entry point for the Streamlit workflow orchestrating the localisation pipeline."""
+
+    st.set_page_config(page_title="Assistant Workflow", layout="wide")
+    _ensure_session_defaults()
+
     settings = load_settings()
+    llm_client = _build_llm_client(settings)
 
-    with st.sidebar:
-        st.title("Project settings")
-        src_lang = _language_selector("Source language", "src_lang", "en")
-        tgt_lang = _language_selector("Target language", "tgt_lang", "es")
-        document_type = st.selectbox("Document type", options=settings.get("document_types", []))
-        use_alignment = st.checkbox("Show bilingual segments", value=True)
-        generate_style_guide = st.checkbox("Generate style guide", value=True)
-        generate_persona = st.checkbox("Generate translator persona", value=True)
-        generate_pm_brief = st.checkbox("Generate PM brief", value=True)
-        enable_llm = st.checkbox(
-            "Use LLM prompts when available",
-            value=settings.get("llm", {}).get("enabled", False),
-        )
-
-    llm_client = _build_llm_client(settings, enable_llm)
-    prompts = settings.get("prompts", {})
-
-    st.header("AI-Powered Localization Assistant")
-    st.caption(
-        "Upload one or more documents to analyse content, build translation style guides, and brief linguists and project managers."
-    )
-
-    project_name = st.text_input(
-        "Project or client name (optional)",
-        value=st.session_state.get("project_name", ""),
-        help="Used for style guide headers and terminology hand-offs.",
-        key="project_name_input",
-    )
-    st.session_state["project_name"] = project_name
+    st.title("Translation Project Assistant")
+    st.caption("Guide localisation projects from intake to a ready-to-share style guide.")
 
     uploaded_files = st.file_uploader(
-        "Upload one or more files",
+        "1️⃣ Upload files",
         type=["docx", "pdf", "txt", "xlf", "xliff", "mqxliff"],
         accept_multiple_files=True,
+        help="Upload monolingual or bilingual files to kick off the workflow.",
     )
+    if uploaded_files:
+        st.session_state["stored_files"] = _persist_uploaded_files(uploaded_files)
+        file_buffers = _files_from_session(st.session_state["stored_files"])
+        _refresh_language_detection(file_buffers)
+    stored_files = st.session_state.get("stored_files", [])
+    file_buffers = _files_from_session(stored_files)
 
-    if not uploaded_files:
-        st.info("Upload at least one document to begin.")
-        return
+    st.divider()
+    st.subheader("2️⃣ Confirm languages")
+    if not stored_files:
+        st.info("Upload at least one document to continue.")
+    else:
+        language_map = st.session_state.get("file_languages", {})
+        if not language_map:
+            _refresh_language_detection(file_buffers)
+            language_map = st.session_state.get("file_languages", {})
 
-    payloads = load_documents(
-        uploaded_files,
-        default_source_lang=src_lang,
-        default_target_lang=tgt_lang,
+        available_languages = settings.get("languages", {}).get("default_set", list(LANGUAGE_LABELS.keys()))
+        for file_name, info in language_map.items():
+            with st.expander(file_name, expanded=True):
+                detected_src = info.get("detected_source")
+                detected_tgt = info.get("detected_target")
+                if info.get("is_bilingual") and detected_src and detected_tgt:
+                    st.markdown(
+                        f"Detected: **{detected_src.upper()} → {detected_tgt.upper()}**. Confirm or change below."
+                    )
+                elif detected_src:
+                    st.markdown(
+                        f"Detected: **{detected_src.upper()}**. Confirm the source language and choose target(s)."
+                    )
+                else:
+                    st.warning("Unable to detect language automatically. Please select manually.")
+
+                src_default = info.get("source", detected_src or available_languages[0])
+                info["source"] = st.selectbox(
+                    "Source language",
+                    options=available_languages,
+                    index=max(available_languages.index(src_default) if src_default in available_languages else 0, 0),
+                    format_func=_format_language,
+                    key=f"{file_name}_source",
+                )
+                if info.get("is_bilingual"):
+                    tgt_default = info.get("targets", [detected_tgt] if detected_tgt else [])
+                    current = tgt_default[0] if tgt_default else available_languages[0]
+                    chosen = st.selectbox(
+                        "Target language",
+                        options=available_languages,
+                        index=max(available_languages.index(current) if current in available_languages else 0, 0),
+                        format_func=_format_language,
+                        key=f"{file_name}_target",
+                    )
+                    info["targets"] = [chosen]
+                else:
+                    existing = info.get("targets", [])
+                    info["targets"] = st.multiselect(
+                        "Target languages",
+                        options=available_languages,
+                        default=[code for code in existing if code in available_languages],
+                        format_func=_format_language,
+                        key=f"{file_name}_targets",
+                        help="Select one or more target languages for this monolingual file.",
+                    )
+        st.session_state["languages_confirmed"] = _languages_ready(language_map)
+        if st.session_state["languages_confirmed"]:
+            st.success("Languages confirmed for all files.")
+        else:
+            st.info("Confirm source and target languages to unlock the next steps.")
+
+    st.divider()
+    st.subheader("3️⃣ Project details")
+    project_name = st.text_input(
+        "Enter project name (required)",
+        value=st.session_state.get("project_name", ""),
+        key="project_name_input",
     )
+    st.session_state["project_name"] = project_name.strip()
+    if not project_name.strip():
+        st.warning("Project name is required before continuing.")
 
-    if not payloads:
-        st.error("No supported documents were uploaded.")
-        return
-
-    document_analyses = _build_document_analyses(
-        payloads,
-        src_lang=src_lang,
-        tgt_lang=tgt_lang,
-        llm_client=llm_client,
-        prompts=prompts,
-    )
-    combined_analysis = _combine_document_analyses(document_analyses)
-    combined_analysis["document_type"] = document_type
-    combined_analysis["source_language"] = src_lang
-    combined_analysis["target_language"] = tgt_lang
-    combined_analysis["project_name"] = project_name
-
-    st.markdown("### Terminology planning")
-    terminology_choice = st.radio(
-        "Do you want to create terminology from these documents using the external Termextractor?",
+    st.divider()
+    st.subheader("4️⃣ PM information (optional)")
+    pm_choice = st.radio(
+        "Does the PM want to provide project info?",
         options=("No", "Yes"),
+        index=1 if st.session_state.get("pm_notes_enabled") else 0,
         horizontal=True,
-        key="terminology_choice",
+        key="pm_notes_toggle",
     )
-    termextractor_url: str | None = None
-    if terminology_choice == "Yes":
-        termextractor_url = send_to_external_termextractor(
-            uploaded_files,
-            src_lang,
-            tgt_lang,
-            project_name=project_name or combined_analysis.get("domains", ["Project"])[0],
+    st.session_state["pm_notes_enabled"] = pm_choice == "Yes"
+    if st.session_state["pm_notes_enabled"]:
+        st.session_state["pm_notes"] = st.text_area(
+            "Enter or paste PM instructions",
+            value=st.session_state.get("pm_notes", ""),
+            height=180,
+            key="pm_notes_text",
         )
     else:
-        st.caption("Terminology extraction can be initiated later if required.")
+        st.session_state["pm_notes"] = ""
+        st.caption("You can provide PM instructions later if needed.")
 
-    terms: List[dict] = []
-
-    style_guide: Dict[str, Any] | None = None
-    allow_edit = False
-    if generate_style_guide:
-        st.markdown("### Style guide inputs")
-        pm_choice = st.radio(
-            "Do you already have style guide inputs from the client/PM?",
-            options=("No", "Yes"),
-            horizontal=True,
-            key="pm_inputs_choice",
-        )
-        pm_inputs: Dict[str, str] | None = None
-        if pm_choice == "Yes":
-            st.markdown("Provide the information captured in the Translation Style Guide Questionnaire.")
-            pm_inputs = {
-                "company_name": st.text_input(
-                    "Company / project name",
-                    value=st.session_state.get("styleguide_company", project_name),
-                    key="styleguide_company",
-                ),
-                "existing_glossaries": st.text_input(
-                    "Existing glossaries?",
-                    value=st.session_state.get("styleguide_glossaries", ""),
-                    key="styleguide_glossaries",
-                ),
-                "tone_voice": st.text_area(
-                    "Tone & voice",
-                    value=st.session_state.get("styleguide_tone", ""),
-                    height=100,
-                    key="styleguide_tone",
-                ),
-                "dnt_list": st.text_area(
-                    "Do-not-translate list",
-                    value=st.session_state.get("styleguide_dnt", ""),
-                    height=100,
-                    key="styleguide_dnt",
-                ),
-                "number_rules": st.text_area(
-                    "Number/date/currency rules",
-                    value=st.session_state.get("styleguide_numbers", ""),
-                    height=100,
-                    key="styleguide_numbers",
-                ),
-                "ui_rules": st.text_area(
-                    "UI-specific rules",
-                    value=st.session_state.get("styleguide_ui", ""),
-                    height=100,
-                    key="styleguide_ui",
-                ),
-                "sign_off_person": st.text_input(
-                    "Sign-off person",
-                    value=st.session_state.get("styleguide_signoff", ""),
-                    key="styleguide_signoff",
-                ),
-            }
-        allow_edit = st.checkbox(
-            "Allow PM to edit before download",
-            value=st.session_state.get("styleguide_allow_edit", False),
-            key="styleguide_allow_edit",
-        )
-        style_prompt = prompts.get("style_guide") if llm_client else None
-        style_guide = build_style_guide(
-            combined_analysis,
-            src_lang,
-            tgt_lang,
-            terms=terms,
-            pm_inputs=pm_inputs,
-            project_name=(pm_inputs or {}).get("company_name") or project_name,
-            llm_client=llm_client,
-            prompt=style_prompt,
-        )
-
-        if allow_edit and style_guide:
-            st.markdown("#### Editable style guide draft (YAML)")
-            default_yaml = st.session_state.get("styleguide_editor_text")
-            if not default_yaml:
-                default_yaml = yaml.safe_dump(style_guide, sort_keys=False, allow_unicode=True)
-            edited_yaml = st.text_area(
-                "Update the style guide as needed, then share or download.",
-                value=default_yaml,
-                height=420,
-                key="styleguide_editor_text",
+    st.divider()
+    st.subheader("5️⃣ Document analysis")
+    analysis_ready = (
+        stored_files
+        and st.session_state.get("languages_confirmed")
+        and bool(project_name.strip())
+    )
+    chunking_cfg = settings.get("chunking", {"max_chars": 4000, "overlap": 400})
+    if not analysis_ready:
+        st.info("Upload files, confirm languages, and provide a project name to analyse documents.")
+    else:
+        if st.button("Analyse uploaded documents", key="analyse_documents"):
+            chunks = extract_text_chunks(
+                _files_from_session(stored_files),
+                max_chars=int(chunking_cfg.get("max_chars", 4000)),
+                overlap=int(chunking_cfg.get("overlap", 400)),
             )
+            st.session_state["analysis_chunks"] = chunks
+            st.session_state["analysis_result"] = classify_domain(chunks, llm_client)
+            st.session_state["analysis_confirmed"] = False
+            st.session_state["editing_analysis"] = False
+
+        analysis_result = st.session_state.get("analysis_result")
+        if analysis_result:
+            domain = analysis_result.get("domain", "Unknown")
+            subdomains = ", ".join(analysis_result.get("subdomains", [])) or "—"
+            related = ", ".join(analysis_result.get("related", [])) or "—"
+            col1, col2, col3 = st.columns(3)
+            col1.markdown("**Domain**")
+            col1.write(domain)
+            col2.markdown("**Subdomains**")
+            col2.write(subdomains)
+            col3.markdown("**Related fields**")
+            col3.write(related)
+
+            action_col1, action_col2 = st.columns(2)
+            if action_col1.button("Accept analysis", key="accept_analysis"):
+                st.session_state["analysis_confirmed"] = True
+                st.session_state["editing_analysis"] = False
+            if action_col2.button("Edit manually", key="edit_analysis"):
+                st.session_state["editing_analysis"] = True
+
+            if st.session_state.get("editing_analysis"):
+                with st.form("manual_analysis_edit"):
+                    manual_domain = st.text_input(
+                        "Main domain",
+                        value=analysis_result.get("domain", ""),
+                    )
+                    manual_subdomains = st.text_input(
+                        "Subdomains (comma separated)",
+                        value=", ".join(analysis_result.get("subdomains", [])),
+                    )
+                    manual_related = st.text_area(
+                        "Related technical fields (comma separated)",
+                        value=", ".join(analysis_result.get("related", [])),
+                        height=100,
+                    )
+                    submitted = st.form_submit_button("Save domain selection")
+                    if submitted:
+                        st.session_state["analysis_result"] = {
+                            "domain": manual_domain.strip() or "General",
+                            "subdomains": [part.strip() for part in manual_subdomains.split(",") if part.strip()],
+                            "related": [part.strip() for part in manual_related.split(",") if part.strip()],
+                        }
+                        st.session_state["analysis_confirmed"] = True
+                        st.session_state["editing_analysis"] = False
+                        st.success("Domain details updated.")
+        else:
+            st.caption("Run the analysis to populate domain, subdomain, and related field insights.")
+
+    st.divider()
+    st.subheader("6️⃣ Terminology extraction")
+    term_choice = st.radio(
+        "Do you want to extract terminology from these files now?",
+        options=("No", "Yes"),
+        index=1 if st.session_state.get("terminology_required") else 0,
+        horizontal=True,
+        key="terminology_toggle",
+    )
+    st.session_state["terminology_required"] = term_choice == "Yes"
+
+    terminology_entries = st.session_state.get("terminology_entries", [])
+    if st.session_state["terminology_required"] and stored_files:
+        language_map = st.session_state.get("file_languages", {})
+        src_languages = {info.get("source") for info in language_map.values() if info.get("source")}
+        tgt_languages = {target for info in language_map.values() for target in info.get("targets", [])}
+        primary_src = next(iter(src_languages), "en")
+        primary_tgt = next(iter(tgt_languages), "en")
+        send_to_external_termextractor(
+            _files_from_session(stored_files),
+            src_lang=primary_src,
+            tgt_lang=primary_tgt,
+            project_name=project_name.strip() or "Translation Project",
+            base_url=settings.get("external_tools", {}).get("terminology_url"),
+        )
+        uploaded_terminology = st.file_uploader(
+            "Upload extracted terminology file (XLSX/CSV/TBX)",
+            type=["xlsx", "csv", "tbx"],
+            key="terminology_upload",
+        )
+        if uploaded_terminology is not None:
             try:
-                parsed = yaml.safe_load(edited_yaml) or {}
-                if isinstance(parsed, dict):
-                    style_guide = parsed
-                else:
-                    st.warning("Edited content must resolve to a dictionary; keeping the previous version.")
-            except yaml.YAMLError as exc:
-                st.warning(f"Unable to parse edited content: {exc}")
+                terminology_entries = parse_terminology_file(uploaded_terminology)
+                st.session_state["terminology_entries"] = terminology_entries
+                st.success(f"Loaded {len(terminology_entries)} terminology entries.")
+            except Exception as exc:  # pragma: no cover - UI feedback only
+                st.error(f"Unable to parse terminology file: {exc}")
+    elif term_choice == "No":
+        st.caption("Terminology extraction can be completed later and uploaded when ready.")
 
-    persona: Dict[str, Any] | None = None
-    if generate_persona:
-        persona_prompt = prompts.get("persona") if llm_client else None
-        persona = build_persona(
-            combined_analysis,
-            style_guide or {},
-            src_lang,
-            tgt_lang,
-            llm_client=llm_client,
-            prompt=persona_prompt,
+    st.divider()
+    st.subheader("7️⃣ Style guide creation")
+    if not st.session_state.get("analysis_confirmed"):
+        st.info("Accept or edit the document analysis before generating the style guide.")
+    else:
+        styleguide_mode = st.radio(
+            "How should we complete the style guide?",
+            options=("Let AI fill missing sections", "I'll add manual answers"),
+            index=0 if st.session_state.get("styleguide_mode") == "ai" else 1,
+            key="styleguide_mode_selector",
         )
+        st.session_state["styleguide_mode"] = "ai" if styleguide_mode.startswith("Let AI") else "manual"
+        manual_additions = ""
+        if st.session_state["styleguide_mode"] == "manual":
+            manual_additions = st.text_area(
+                "Add manual answers or clarifications for the questionnaire",
+                height=220,
+                key="styleguide_manual_notes",
+            )
+        if st.button("Generate style guide", key="generate_styleguide"):
+            language_map = st.session_state.get("file_languages", {})
+            sources = sorted({info.get("source") for info in language_map.values() if info.get("source")})
+            targets = sorted({target for info in language_map.values() for target in info.get("targets", [])})
+            styleguide = build_styleguide(
+                analysis=st.session_state.get("analysis_result", {}),
+                pm_notes=st.session_state.get("pm_notes", ""),
+                terminology=terminology_entries,
+                langs={"sources": sources, "targets": targets},
+                llm_client=llm_client,
+                project_name=project_name.strip(),
+                manual_notes=manual_additions,
+            )
+            st.session_state["styleguide_data"] = styleguide
+            st.session_state["styleguide_docx"] = export_styleguide_docx(
+                styleguide,
+                filename=project_name.strip() or "StyleGuide",
+            )
+            st.success("Style guide assembled. Proceed to download below.")
 
-    pm_brief: Dict[str, Any] | None = None
-    if generate_pm_brief:
-        brief_prompt = prompts.get("pm_brief") if llm_client else None
-        pm_brief = build_pm_brief(
-            combined_analysis,
-            terms,
-            llm_client=llm_client,
-            prompt=brief_prompt,
+        if st.session_state.get("styleguide_data"):
+            st.markdown("#### Preview")
+            st.json(st.session_state["styleguide_data"])
+
+    st.divider()
+    st.subheader("8️⃣ Downloads")
+    docx_bytes = st.session_state.get("styleguide_docx")
+    if docx_bytes:
+        st.download_button(
+            "Download Style Guide (Word)",
+            data=docx_bytes,
+            file_name=f"{project_name.strip() or 'StyleGuide'}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )
+    else:
+        st.caption("Generate the style guide to enable downloads.")
 
-    tab_titles = [
-        "Document analysis",
-        "Style guide",
-        "Translator persona",
-        "Terminology",
-        "PM brief",
-    ]
-    tabs = st.tabs(tab_titles)
-
-    with tabs[0]:
-        st.subheader("Document analysis")
-        components.render_json(combined_analysis)
-        components.download_json_button("Download analysis JSON", combined_analysis, "analysis.json")
-        components.download_docx_button("Download analysis DOCX", combined_analysis, "analysis.docx", "Document Analysis")
-        if document_analyses:
-            st.markdown("#### Per-document insights")
-            for document_analysis in document_analyses:
-                with st.expander(document_analysis.get("filename", "Document")):
-                    components.render_json(document_analysis)
-        if use_alignment:
-            segmented_payloads = [payload for payload in payloads if payload.segments]
-            if segmented_payloads:
-                st.markdown("#### Bilingual segments preview")
-                for payload in segmented_payloads:
-                    st.markdown(f"**{payload.filename}**")
-                    st.dataframe(payload.segments[:20])
-
-    with tabs[1]:
-        st.subheader("Style guide")
-        if style_guide:
-            components.render_json(style_guide)
-            components.download_json_button("Download style guide JSON", style_guide, "style_guide.json")
-            components.download_docx_button(
-                "Download style guide DOCX",
-                style_guide,
-                "style_guide.docx",
-                "Translation Style Guide",
-            )
-        else:
-            st.info("Enable style guide generation to view this tab.")
-
-    with tabs[2]:
-        st.subheader("Translator persona")
-        if persona:
-            components.render_json(persona)
-            components.download_json_button("Download persona JSON", persona, "translator_persona.json")
-            components.download_docx_button(
-                "Download persona DOCX",
-                persona,
-                "translator_persona.docx",
-                "Translator Persona",
-            )
-        else:
-            st.info("Enable persona generation to view this tab.")
-
-    with tabs[3]:
-        st.subheader("Terminology")
-        if terminology_choice == "Yes":
-            st.success("Terminology extraction delegated to the Termextractor app.")
-            if termextractor_url:
-                st.markdown(f"[Open Termextractor]({termextractor_url})")
-        else:
-            st.info("Terminology extraction was skipped for now.")
-
-    with tabs[4]:
-        st.subheader("Project manager brief")
-        if pm_brief:
-            components.render_json(pm_brief)
-            components.download_json_button("Download PM brief JSON", pm_brief, "pm_brief.json")
-            components.download_docx_button("Download PM brief DOCX", pm_brief, "pm_brief.docx", "PM Brief")
-        else:
-            st.info("Enable PM brief generation to view this tab.")
+    step_status = {
+        "1️⃣ Upload files": bool(stored_files),
+        "2️⃣ Confirm languages": st.session_state.get("languages_confirmed", False),
+        "3️⃣ Enter project name": bool(project_name.strip()),
+        "4️⃣ PM info": True,  # optional step always considered complete
+        "5️⃣ Analyse documents": bool(st.session_state.get("analysis_result")),
+        "6️⃣ Terminology": not st.session_state.get("terminology_required")
+        or bool(st.session_state.get("terminology_entries")),
+        "7️⃣ Generate style guide": bool(st.session_state.get("styleguide_data")),
+        "8️⃣ Download outputs": bool(docx_bytes),
+    }
+    st.sidebar.header("Workflow progress")
+    _update_progress_sidebar(step_status)
 
 
 if __name__ == "__main__":

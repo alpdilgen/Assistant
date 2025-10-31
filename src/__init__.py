@@ -1,0 +1,1 @@
+"""Core package for the Streamlit-based localisation assistant."""
