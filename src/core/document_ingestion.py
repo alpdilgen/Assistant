@@ -132,13 +132,8 @@ def chunk_text(text: str, max_chars: int = 4000, overlap: int = 400) -> list[str
     return chunks
 
 
-def load_and_chunk_files(
-    files: Sequence[io.BufferedIOBase],
-    *,
-    max_chars: int = 4000,
-    overlap: int = 400,
-) -> list[str]:
-    """Read uploaded files fully and return joined chunks covering all content."""
+def _read_all_text_parts(files: Sequence[io.BufferedIOBase]) -> list[str]:
+    """Read raw text from supported files without applying any chunking."""
 
     all_text_parts: list[str] = []
     for file in files:
@@ -173,8 +168,40 @@ def load_and_chunk_files(
             all_text_parts.append(text)
             file.seek(0)
 
-    joined = "\n".join(part for part in all_text_parts if part)
+    return [part for part in all_text_parts if part]
+
+
+def join_text_parts(parts: Sequence[str]) -> str:
+    """Join extracted text parts into a single string."""
+
+    return "\n".join(part for part in parts if part)
+
+
+def load_and_chunk_files(
+    files: Sequence[io.BufferedIOBase],
+    *,
+    max_chars: int = 4000,
+    overlap: int = 400,
+) -> list[str]:
+    """Read uploaded files fully and return joined chunks covering all content."""
+
+    all_text_parts = _read_all_text_parts(files)
+    joined = join_text_parts(all_text_parts)
     return chunk_text(joined, max_chars=max_chars, overlap=overlap)
+
+
+def ingest_files(
+    files: Sequence[io.BufferedIOBase],
+    *,
+    max_chars: int = 4000,
+    overlap: int = 400,
+) -> tuple[list[str], str]:
+    """Return both the concatenated text and its chunks for downstream analysis."""
+
+    parts = _read_all_text_parts(files)
+    joined = join_text_parts(parts)
+    chunks = chunk_text(joined, max_chars=max_chars, overlap=overlap)
+    return chunks, joined
 
 
 def extract_text_chunks(
@@ -359,4 +386,6 @@ __all__ = [
     "chunk_text",
     "load_and_chunk_files",
     "extract_text_chunks",
+    "join_text_parts",
+    "ingest_files",
 ]
