@@ -8,7 +8,7 @@ import os
 import re
 import tempfile
 from typing import Optional, Sequence, TYPE_CHECKING
-from xml.etree import ElementTree as ET
+import xml.etree.ElementTree as ET
 
 from langdetect import detect
 
@@ -91,62 +91,101 @@ def detect_langs_from_file(file_obj: io.BufferedIOBase) -> tuple[Optional[str], 
         return None, None
 
 
+def extract_plaintext_from_xliff(file: io.BufferedIOBase) -> list[str]:
+    """Extract every source string from an XLIFF document, regardless of size."""
+
+    texts: list[str] = []
+    position = file.tell()
+    try:
+        file.seek(0)
+        tree = ET.parse(file)
+        root = tree.getroot()
+        for elem in root.iter():
+            tag = elem.tag.lower() if isinstance(elem.tag, str) else ""
+            if tag.endswith("source") and elem.text:
+                texts.append(elem.text)
+    finally:
+        file.seek(position)
+    return texts
+
+
+def chunk_text(text: str, max_chars: int = 4000, overlap: int = 400) -> list[str]:
+    """Split long text into overlapping chunks to cover the full document."""
+
+    if not text:
+        return []
+    if max_chars <= 0:
+        raise ValueError("max_chars must be greater than zero")
+
+    effective_step = max(max_chars - max(overlap, 0), 1)
+    chunks: list[str] = []
+    start = 0
+    total_length = len(text)
+    while start < total_length:
+        end = min(start + max_chars, total_length)
+        chunk = text[start:end]
+        if chunk.strip():
+            chunks.append(chunk)
+        if end >= total_length:
+            break
+        start += effective_step
+    return chunks
+
+
+def load_and_chunk_files(
+    files: Sequence[io.BufferedIOBase],
+    *,
+    max_chars: int = 4000,
+    overlap: int = 400,
+) -> list[str]:
+    """Read uploaded files fully and return joined chunks covering all content."""
+
+    all_text_parts: list[str] = []
+    for file in files:
+        if file is None:
+            continue
+        name = getattr(file, "name", "").lower()
+        file.seek(0)
+        if name.endswith((".xlf", ".xliff", ".mqxliff")):
+            parts = extract_plaintext_from_xliff(file)
+            all_text_parts.extend(parts)
+        elif name.endswith(".docx"):
+            if docx2txt is None:  # pragma: no cover - dependency guard
+                raise RuntimeError("docx2txt is required to process DOCX files")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
+                tmp.write(file.read())
+                tmp_path = tmp.name
+            try:
+                text = docx2txt.process(tmp_path) or ""
+                all_text_parts.append(text)
+            finally:
+                file.seek(0)
+                try:
+                    os.unlink(tmp_path)
+                except OSError:  # pragma: no cover - best effort cleanup
+                    pass
+        else:
+            raw = file.read()
+            if isinstance(raw, bytes):
+                text = raw.decode(errors="ignore")
+            else:
+                text = str(raw)
+            all_text_parts.append(text)
+            file.seek(0)
+
+    joined = "\n".join(part for part in all_text_parts if part)
+    return chunk_text(joined, max_chars=max_chars, overlap=overlap)
+
+
 def extract_text_chunks(
     files: Sequence[io.BufferedIOBase],
     *,
     max_chars: int = 4000,
     overlap: int = 400,
 ) -> list[str]:
-    """Read uploaded files and split their text into overlapping chunks."""
+    """Legacy wrapper maintained for backwards compatibility."""
 
-    texts: list[str] = []
-    for file_obj in files:
-        name = getattr(file_obj, "name", "").lower()
-        file_obj.seek(0)
-        if name.endswith((".xlf", ".xliff", ".mqxliff")):
-            try:
-                tree = ET.parse(file_obj)
-                sources = [node.text for node in tree.findall(".//{*}source") if node.text]
-                texts.extend(sources)
-            finally:
-                file_obj.seek(0)
-        elif name.endswith(".docx"):
-            if docx2txt is None:  # pragma: no cover - dependency guard
-                raise RuntimeError("docx2txt is required to process DOCX files")
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
-                tmp.write(file_obj.read())
-                tmp_path = tmp.name
-            try:
-                extracted = docx2txt.process(tmp_path) or ""
-                texts.append(extracted)
-            finally:
-                file_obj.seek(0)
-                try:
-                    os.unlink(tmp_path)
-                except OSError:  # pragma: no cover - best effort cleanup
-                    pass
-        else:
-            raw_bytes = file_obj.read()
-            if isinstance(raw_bytes, bytes):
-                text = raw_bytes.decode(errors="ignore")
-            else:
-                text = str(raw_bytes)
-            texts.append(text)
-            file_obj.seek(0)
-
-    joined = "\n".join(part for part in texts if part)
-    if not joined:
-        return []
-
-    chunks: list[str] = []
-    start = 0
-    while start < len(joined):
-        end = min(start + max_chars, len(joined))
-        chunks.append(joined[start:end])
-        if end == len(joined):
-            break
-        start += max(max_chars - overlap, 1)
-    return chunks
+    return load_and_chunk_files(files, max_chars=max_chars, overlap=overlap)
 
 
 def load_documents(
@@ -316,5 +355,8 @@ __all__ = [
     "load_document",
     "load_documents",
     "detect_langs_from_file",
+    "extract_plaintext_from_xliff",
+    "chunk_text",
+    "load_and_chunk_files",
     "extract_text_chunks",
 ]

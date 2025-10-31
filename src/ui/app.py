@@ -11,9 +11,9 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from src.core.document_ingestion import detect_langs_from_file, extract_text_chunks
-from src.core.document_analysis import classify_domain
-from src.core.styleguide_builder import build_styleguide, export_styleguide_docx
+from src.core.document_ingestion import detect_langs_from_file, load_and_chunk_files
+from src.core.document_analysis import analyze_document_chunks
+from src.core.styleguide_builder import build_cayva_like_styleguide, styleguide_to_docx
 from src.core.terminology_client import parse_terminology_file, send_to_external_termextractor
 from src.core.llm_client import LLMClient
 
@@ -23,35 +23,34 @@ if TYPE_CHECKING:  # pragma: no cover - import only for typing
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "settings.yaml"
 
 LANGUAGE_LABELS: Dict[str, str] = {
+    "en": "English",
+    "sk": "Slovak",
+    "de": "German",
+    "fr": "French",
+    "it": "Italian",
+    "es": "Spanish",
+    "pt": "Portuguese",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "ro": "Romanian",
     "bg": "Bulgarian",
-    "hr": "Croatian",
     "cs": "Czech",
     "da": "Danish",
-    "nl": "Dutch",
-    "en": "English",
     "et": "Estonian",
     "fi": "Finnish",
-    "fr": "French",
-    "de": "German",
     "el": "Greek",
     "hu": "Hungarian",
-    "ga": "Irish",
-    "it": "Italian",
-    "lv": "Latvian",
+    "hr": "Croatian",
     "lt": "Lithuanian",
+    "lv": "Latvian",
     "mt": "Maltese",
-    "pl": "Polish",
-    "pt": "Portuguese",
-    "ro": "Romanian",
-    "sk": "Slovak",
     "sl": "Slovenian",
-    "es": "Spanish",
     "sv": "Swedish",
     "tr": "Turkish",
     "ru": "Russian",
     "uk": "Ukrainian",
     "ar": "Arabic",
-    "zh-CN": "Chinese (Simplified)",
+    "zh-cn": "Chinese (Simplified)",
     "ja": "Japanese",
     "ko": "Korean",
     "no": "Norwegian",
@@ -59,41 +58,7 @@ LANGUAGE_LABELS: Dict[str, str] = {
     "bs": "Bosnian",
 }
 
-ALL_LANGS: List[str] = [
-    "en",
-    "sk",
-    "de",
-    "fr",
-    "it",
-    "es",
-    "pt",
-    "nl",
-    "pl",
-    "ro",
-    "bg",
-    "cs",
-    "da",
-    "et",
-    "fi",
-    "el",
-    "hu",
-    "hr",
-    "lt",
-    "lv",
-    "mt",
-    "sl",
-    "sv",
-    "tr",
-    "ru",
-    "uk",
-    "ar",
-    "zh-CN",
-    "ja",
-    "ko",
-    "no",
-    "sr",
-    "bs",
-]
+ALL_LANGS: List[str] = list(LANGUAGE_LABELS.keys())
 
 
 @st.cache_resource
@@ -140,8 +105,6 @@ def _ensure_session_defaults() -> None:
         "terminology_required": False,
         "styleguide_data": None,
         "styleguide_docx": None,
-        "styleguide_mode": "ai",
-        "editing_analysis": False,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -184,6 +147,23 @@ def _format_language(code: str | None) -> str:
     return code.upper()
 
 
+def _build_language_options(candidates: Iterable[str]) -> List[str]:
+    options: List[str] = [""]
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        normalised = candidate.strip().lower()
+        if normalised and normalised not in seen:
+            options.append(normalised)
+            seen.add(normalised)
+    for lang in ALL_LANGS:
+        if lang not in seen:
+            options.append(lang)
+            seen.add(lang)
+    return options
+
+
 def _refresh_language_detection(files: List[io.BytesIO]) -> None:
     """Detect languages for each uploaded file and store them in session state."""
 
@@ -192,13 +172,15 @@ def _refresh_language_detection(files: List[io.BytesIO]) -> None:
         file.seek(0)
         detected_src, detected_tgt = detect_langs_from_file(file)
         file.seek(0)
-        targets = [detected_tgt] if detected_tgt else []
+        normalised_src = (detected_src or "").strip().lower()
+        normalised_tgt = (detected_tgt or "").strip().lower()
+        targets = [normalised_tgt] if normalised_tgt else []
         detections[file.name] = {
-            "detected_source": detected_src,
-            "detected_target": detected_tgt,
-            "source": detected_src or "",
+            "detected_source": normalised_src,
+            "detected_target": normalised_tgt,
+            "source": normalised_src or "",
             "targets": [target for target in targets if target],
-            "is_bilingual": bool(detected_tgt),
+            "is_bilingual": bool(normalised_tgt),
         }
     st.session_state["file_languages"] = detections
     st.session_state["languages_confirmed"] = False
@@ -268,7 +250,7 @@ def main() -> None:
 
         available_languages = settings.get("languages", {}).get("default_set") or ALL_LANGS
         available_languages = [
-            lang
+            lang.strip().lower()
             for lang in available_languages
             if isinstance(lang, str) and lang.strip()
         ]
@@ -294,16 +276,8 @@ def main() -> None:
                         f"Unable to detect language automatically for {file_name}. Please select manually."
                     )
 
-                selectable_sources: List[str] = []
-                for candidate in (detected_src, info.get("source")):
-                    if candidate and candidate not in selectable_sources:
-                        selectable_sources.append(candidate)
-                for lang in available_languages:
-                    if lang not in selectable_sources:
-                        selectable_sources.append(lang)
-                selectable_sources = [""] + selectable_sources
-
                 current_source = info.get("source") or detected_src or ""
+                selectable_sources = _build_language_options([detected_src, current_source])
                 source_index = (
                     selectable_sources.index(current_source)
                     if current_source in selectable_sources
@@ -316,19 +290,12 @@ def main() -> None:
                     format_func=_format_language,
                     key=f"{file_name}_source",
                 )
-                info["source"] = selected_source.strip() if selected_source else ""
+                info["source"] = selected_source.strip().lower() if selected_source else ""
 
                 if is_bilingual:
-                    tgt_candidates: List[str] = []
                     existing_targets = [target for target in info.get("targets", []) if target]
                     current_target = existing_targets[0] if existing_targets else (detected_tgt or "")
-                    for candidate in (detected_tgt, current_target):
-                        if candidate and candidate not in tgt_candidates:
-                            tgt_candidates.append(candidate)
-                    for lang in available_languages:
-                        if lang not in tgt_candidates:
-                            tgt_candidates.append(lang)
-                    tgt_options = [""] + tgt_candidates
+                    tgt_options = _build_language_options([detected_tgt, current_target])
                     target_index = (
                         tgt_options.index(current_target)
                         if current_target in tgt_options
@@ -341,7 +308,7 @@ def main() -> None:
                         format_func=_format_language,
                         key=f"{file_name}_target",
                     )
-                    info["targets"] = [chosen.strip()] if chosen else []
+                    info["targets"] = [chosen.strip().lower()] if chosen else []
                 else:
                     existing = [code for code in info.get("targets", []) if code]
                     info["targets"] = st.multiselect(
@@ -406,63 +373,63 @@ def main() -> None:
                 if not info.get("source"):
                     st.error("Please select a source language to continue.")
                     st.stop()
-            chunks = extract_text_chunks(
-                _files_from_session(stored_files),
-                max_chars=int(chunking_cfg.get("max_chars", 4000)),
-                overlap=int(chunking_cfg.get("overlap", 400)),
-            )
-            st.session_state["analysis_chunks"] = chunks
-            st.session_state["analysis_result"] = classify_domain(chunks, llm_client)
+            with st.spinner("Analyzing full document content…"):
+                file_buffers = _files_from_session(stored_files)
+                chunks = load_and_chunk_files(
+                    file_buffers,
+                    max_chars=int(chunking_cfg.get("max_chars", 4000)),
+                    overlap=int(chunking_cfg.get("overlap", 400)),
+                )
+                st.session_state["analysis_chunks"] = chunks
+                st.session_state["analysis_result"] = analyze_document_chunks(
+                    chunks,
+                    llm_client=llm_client,
+                    pm_notes=st.session_state.get("pm_notes", ""),
+                )
             st.session_state["analysis_confirmed"] = False
-            st.session_state["editing_analysis"] = False
+            st.session_state["styleguide_data"] = None
+            st.session_state["styleguide_docx"] = None
 
         analysis_result = st.session_state.get("analysis_result")
         if analysis_result:
             domain = analysis_result.get("domain", "Unknown")
-            subdomains = ", ".join(analysis_result.get("subdomains", [])) or "—"
-            related = ", ".join(analysis_result.get("related", [])) or "—"
+            purpose = analysis_result.get("primary_purpose", "—")
+            tone = analysis_result.get("tone", "neutral")
+            audience = analysis_result.get("audience", "general")
             col1, col2, col3 = st.columns(3)
-            col1.markdown("**Domain**")
-            col1.write(domain)
-            col2.markdown("**Subdomains**")
-            col2.write(subdomains)
-            col3.markdown("**Related fields**")
-            col3.write(related)
+            col1.metric("Primary domain", domain.title())
+            col2.metric("Purpose", purpose)
+            col3.metric("Tone", tone.title())
 
-            action_col1, action_col2 = st.columns(2)
-            if action_col1.button("Accept analysis", key="accept_analysis"):
+            st.markdown("**Target audience**")
+            st.write(audience.title())
+
+            subdomains = analysis_result.get("subdomains", []) or []
+            related = analysis_result.get("related", []) or []
+            keywords = analysis_result.get("keywords", []) or []
+            technical_symbols = analysis_result.get("technical_symbols", []) or []
+
+            details_col1, details_col2 = st.columns(2)
+            details_col1.markdown("**Subdomains**")
+            details_col1.write(", ".join(subdomains) or "—")
+            details_col1.markdown("**Related fields**")
+            details_col1.write(", ".join(related) or "—")
+
+            details_col2.markdown("**Key terms**")
+            details_col2.write(", ".join(keywords[:8]) or "—")
+            details_col2.markdown("**Technical symbols**")
+            details_col2.write(", ".join(technical_symbols) or "—")
+
+            summary_text = analysis_result.get("summary")
+            if summary_text:
+                st.markdown("**Document summary**")
+                st.write(summary_text)
+
+            if st.button("Accept analysis", key="accept_analysis"):
                 st.session_state["analysis_confirmed"] = True
-                st.session_state["editing_analysis"] = False
-            if action_col2.button("Edit manually", key="edit_analysis"):
-                st.session_state["editing_analysis"] = True
-
-            if st.session_state.get("editing_analysis"):
-                with st.form("manual_analysis_edit"):
-                    manual_domain = st.text_input(
-                        "Main domain",
-                        value=analysis_result.get("domain", ""),
-                    )
-                    manual_subdomains = st.text_input(
-                        "Subdomains (comma separated)",
-                        value=", ".join(analysis_result.get("subdomains", [])),
-                    )
-                    manual_related = st.text_area(
-                        "Related technical fields (comma separated)",
-                        value=", ".join(analysis_result.get("related", [])),
-                        height=100,
-                    )
-                    submitted = st.form_submit_button("Save domain selection")
-                    if submitted:
-                        st.session_state["analysis_result"] = {
-                            "domain": manual_domain.strip() or "General",
-                            "subdomains": [part.strip() for part in manual_subdomains.split(",") if part.strip()],
-                            "related": [part.strip() for part in manual_related.split(",") if part.strip()],
-                        }
-                        st.session_state["analysis_confirmed"] = True
-                        st.session_state["editing_analysis"] = False
-                        st.success("Domain details updated.")
+                st.success("Document analysis confirmed. Continue with terminology and style guide steps.")
         else:
-            st.caption("Run the analysis to populate domain, subdomain, and related field insights.")
+            st.caption("Run the analysis to populate domain, purpose, tone, and terminology insights.")
 
     st.divider()
     st.subheader("6️⃣ Terminology extraction")
@@ -478,10 +445,13 @@ def main() -> None:
     terminology_entries = st.session_state.get("terminology_entries", [])
     if st.session_state["terminology_required"] and stored_files:
         language_map = st.session_state.get("file_languages", {})
-        src_languages = {info.get("source") for info in language_map.values() if info.get("source")}
-        tgt_languages = {target for info in language_map.values() for target in info.get("targets", [])}
-        primary_src = next(iter(src_languages), "en")
-        primary_tgt = next(iter(tgt_languages), "en")
+        src_languages = sorted({info.get("source") for info in language_map.values() if info.get("source")})
+        tgt_languages = sorted({target for info in language_map.values() for target in info.get("targets", [])})
+        primary_src = src_languages[0] if src_languages else "en"
+        primary_tgt = tgt_languages[0] if tgt_languages else (primary_src or "en")
+        st.markdown(
+            "Use the external Termextractor to prepare terminology. Upload the exported glossary here once ready."
+        )
         send_to_external_termextractor(
             _files_from_session(stored_files),
             src_lang=primary_src,
@@ -507,41 +477,25 @@ def main() -> None:
     st.divider()
     st.subheader("7️⃣ Style guide creation")
     if not st.session_state.get("analysis_confirmed"):
-        st.info("Accept or edit the document analysis before generating the style guide.")
+        st.info("Confirm the document analysis before generating the style guide.")
     else:
-        styleguide_mode = st.radio(
-            "How should we complete the style guide?",
-            options=("Let AI fill missing sections", "I'll add manual answers"),
-            index=0 if st.session_state.get("styleguide_mode") == "ai" else 1,
-            key="styleguide_mode_selector",
-        )
-        st.session_state["styleguide_mode"] = "ai" if styleguide_mode.startswith("Let AI") else "manual"
-        manual_additions = ""
-        if st.session_state["styleguide_mode"] == "manual":
-            manual_additions = st.text_area(
-                "Add manual answers or clarifications for the questionnaire",
-                height=220,
-                key="styleguide_manual_notes",
-            )
-        if st.button("Generate style guide", key="generate_styleguide"):
+        if st.button("Create Style Guide (Cayva level)", key="generate_styleguide"):
             language_map = st.session_state.get("file_languages", {})
             sources = sorted({info.get("source") for info in language_map.values() if info.get("source")})
             targets = sorted({target for info in language_map.values() for target in info.get("targets", [])})
-            styleguide = build_styleguide(
+            primary_src = sources[0] if sources else ""
+            primary_tgt = targets[0] if targets else ""
+            styleguide = build_cayva_like_styleguide(
                 analysis=st.session_state.get("analysis_result", {}),
                 pm_notes=st.session_state.get("pm_notes", ""),
                 terminology=terminology_entries,
-                langs={"sources": sources, "targets": targets},
-                llm_client=llm_client,
+                src_lang=primary_src,
+                tgt_lang=primary_tgt,
                 project_name=project_name.strip(),
-                manual_notes=manual_additions,
             )
             st.session_state["styleguide_data"] = styleguide
-            st.session_state["styleguide_docx"] = export_styleguide_docx(
-                styleguide,
-                filename=project_name.strip() or "StyleGuide",
-            )
-            st.success("Style guide assembled. Proceed to download below.")
+            st.session_state["styleguide_docx"] = styleguide_to_docx(styleguide)
+            st.success("Style guide assembled. Preview and download below.")
 
         if st.session_state.get("styleguide_data"):
             st.markdown("#### Preview")
@@ -565,10 +519,10 @@ def main() -> None:
         "2️⃣ Confirm languages": st.session_state.get("languages_confirmed", False),
         "3️⃣ Enter project name": bool(project_name.strip()),
         "4️⃣ PM info": True,  # optional step always considered complete
-        "5️⃣ Analyse documents": bool(st.session_state.get("analysis_result")),
+        "5️⃣ Analyse documents": st.session_state.get("analysis_confirmed", False),
         "6️⃣ Terminology": not st.session_state.get("terminology_required")
         or bool(st.session_state.get("terminology_entries")),
-        "7️⃣ Generate style guide": bool(st.session_state.get("styleguide_data")),
+        "7️⃣ Create style guide": bool(st.session_state.get("styleguide_data")),
         "8️⃣ Download outputs": bool(docx_bytes),
     }
     st.sidebar.header("Workflow progress")
